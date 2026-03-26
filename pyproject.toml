@@ -1,0 +1,18 @@
+[project]
+name = "axle-cli-agent"
+version = "0.1.0"
+description = "Terminal-first coding agent for Axle with Goose integration."
+requires-python = ">=3.10"
+dependencies = [
+  "requests==2.32.5",
+]
+
+[project.scripts]
+axle = "axle_cli.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["axle_cli"]
