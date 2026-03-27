@@ -2,103 +2,47 @@
 
 Terminal-first CLI for the Axle repo. This app is separate from the dashboard stack and uses Goose as the only execution engine. Axle handles repo setup, terminal output, tests, and PR creation around that Goose session.
 
- +----------------------+
-                           |      User / CLI      |
-                           |   axle / python -m   |
-                           +----------+-----------+
-                                      |
-                                      v
-                           +----------------------+
-                           |       main.py        |
-                           | command parsing/UI   |
-                           +----------+-----------+
-                                      |
-               +----------------------+----------------------+
-               |                      |                      |
-               v                      v                      v
-     +----------------+     +----------------+     +------------------+
-     | github_auth.py |     |    jira.py     |     |    doctor.py     |
-     | GitHub config  |     | Jira fetch/auth|     | readiness checks |
-     +----------------+     +----------------+     +------------------+
-                                      |
-                                      v
-                           +----------------------+
-                           |      session.py      |
-                           | run orchestration    |
-                           +----------+-----------+
-                                      |
-                  +-------------------+-------------------+
-                  |                                       |
-                  v                                       v
-       +----------------------+               +----------------------+
-       |       repo.py        |               |    bootstrap.py      |
-       | workspace/repo prep  |               | env + test inference |
-       +----------+-----------+               +----------+-----------+
-                  |                                       |
-                  +-------------------+-------------------+
-                                      |
-                                      v
-                           +----------------------+
-                           |   Prepared Workspace  |
-                           | repo + .venv + meta   |
-                           +----------+-----------+
-                                      |
-                                      v
-                           +----------------------+
-                           |   goose_runner.py    |
-                           | Goose adapter layer  |
-                           +----------+-----------+
-                                      |
-                       +--------------+--------------+
-                       |                             |
-                       v                             v
-          +--------------------------+   +--------------------------+
-          | Goose Recipe Files       |   | Goose Session Runtime    |
-          | axle_run.yaml            |   | goose run / resume       |
-          | axle_smoke.yaml          |   | structured events        |
-          +--------------------------+   +------------+-------------+
-                                                      |
-                                                      v
-                                           +----------------------+
-                                           |  Provider / Model    |
-                                           | Ollama / OpenRouter  |
-                                           +----------+-----------+
-                                                      |
-                                                      v
-                                           +----------------------+
-                                           |   Local / Hosted LLM |
-                                           +----------------------+
+```mermaid
+flowchart TD
+    U["User / CLI<br/>axle / python -m"] --> M["main.py<br/>command parsing / UI"]
 
-  After Goose run:
-     goose_runner.py -> session.py -> tests.py -> PR flow
+    M --> GH["github_auth.py<br/>GitHub config"]
+    M --> JI["jira.py<br/>Jira fetch / auth"]
+    M --> DR["doctor.py<br/>readiness checks"]
+    M --> SE["session.py<br/>run orchestration"]
 
-                           +----------------------+
-                           |      tests.py        |
-                           | validation commands  |
-                           +----------+-----------+
-                                      |
-                                      v
-                           +----------------------+
-                           |      pr.py           |
-                           | commit / push / PR   |
-                           +----------------------+
+    SE --> RP["repo.py<br/>workspace / repo prep"]
+    SE --> BO["bootstrap.py<br/>env + test inference"]
 
-  Axle owns
+    RP --> WS["Prepared Workspace<br/>repo + env + metadata"]
+    BO --> WS
 
-  - CLI UX
-  - config/auth
-  - Jira/GitHub integration
-  - workspace creation/reuse
-  - environment bootstrap
-  - test execution
-  - PR flow
+    WS --> GR["goose_runner.py<br/>Goose adapter layer"]
 
-  Goose owns
+    GR --> RE["Goose Recipe Files<br/>axle_run.yaml<br/>axle_smoke.yaml"]
+    GR --> GS["Goose Session Runtime<br/>goose run / resume<br/>stream-json events"]
 
-  - session continuity
-  - recipe-driven execution
-  - provider/model runtime
-  - tool-enabled coding loop
+    GS --> PM["Provider / Model<br/>Ollama / hosted APIs"]
+    PM --> LLM["Local / Hosted LLM"]
+
+    GR --> TS["tests.py<br/>validation commands"]
+    TS --> PR["pr.py<br/>commit / push / PR"]
+```
+
+Axle owns:
+- CLI UX
+- config/auth
+- Jira/GitHub integration
+- workspace creation/reuse
+- environment bootstrap
+- test execution
+- PR flow
+
+Goose owns:
+- session continuity
+- recipe-driven execution
+- provider/model runtime
+- tool-enabled coding loop
 
 Axle now runs Goose with a stable workspace session, a bundled recipe, and structured output. That means `axle run KAN-2 --chat` continues the same Goose session instead of rebuilding the whole task string from scratch.
 
