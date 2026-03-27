@@ -2,16 +2,103 @@
 
 Terminal-first CLI for the Axle repo. This app is separate from the dashboard stack and uses Goose as the only execution engine. Axle handles repo setup, terminal output, tests, and PR creation around that Goose session.
 
-1. connect GitHub
-2. save Jira credentials
-3. save a default repo or local path
-4. save a default validation command
-5. inspect the repo
-6. stream short live updates
-7. let Goose edit files directly
-8. run tests
-9. retry once on failure
-10. summarize changes and optionally open a PR
+ +----------------------+
+                           |      User / CLI      |
+                           |   axle / python -m   |
+                           +----------+-----------+
+                                      |
+                                      v
+                           +----------------------+
+                           |       main.py        |
+                           | command parsing/UI   |
+                           +----------+-----------+
+                                      |
+               +----------------------+----------------------+
+               |                      |                      |
+               v                      v                      v
+     +----------------+     +----------------+     +------------------+
+     | github_auth.py |     |    jira.py     |     |    doctor.py     |
+     | GitHub config  |     | Jira fetch/auth|     | readiness checks |
+     +----------------+     +----------------+     +------------------+
+                                      |
+                                      v
+                           +----------------------+
+                           |      session.py      |
+                           | run orchestration    |
+                           +----------+-----------+
+                                      |
+                  +-------------------+-------------------+
+                  |                                       |
+                  v                                       v
+       +----------------------+               +----------------------+
+       |       repo.py        |               |    bootstrap.py      |
+       | workspace/repo prep  |               | env + test inference |
+       +----------+-----------+               +----------+-----------+
+                  |                                       |
+                  +-------------------+-------------------+
+                                      |
+                                      v
+                           +----------------------+
+                           |   Prepared Workspace  |
+                           | repo + .venv + meta   |
+                           +----------+-----------+
+                                      |
+                                      v
+                           +----------------------+
+                           |   goose_runner.py    |
+                           | Goose adapter layer  |
+                           +----------+-----------+
+                                      |
+                       +--------------+--------------+
+                       |                             |
+                       v                             v
+          +--------------------------+   +--------------------------+
+          | Goose Recipe Files       |   | Goose Session Runtime    |
+          | axle_run.yaml            |   | goose run / resume       |
+          | axle_smoke.yaml          |   | structured events        |
+          +--------------------------+   +------------+-------------+
+                                                      |
+                                                      v
+                                           +----------------------+
+                                           |  Provider / Model    |
+                                           | Ollama / OpenRouter  |
+                                           +----------+-----------+
+                                                      |
+                                                      v
+                                           +----------------------+
+                                           |   Local / Hosted LLM |
+                                           +----------------------+
+
+  After Goose run:
+     goose_runner.py -> session.py -> tests.py -> PR flow
+
+                           +----------------------+
+                           |      tests.py        |
+                           | validation commands  |
+                           +----------+-----------+
+                                      |
+                                      v
+                           +----------------------+
+                           |      pr.py           |
+                           | commit / push / PR   |
+                           +----------------------+
+
+  Axle owns
+
+  - CLI UX
+  - config/auth
+  - Jira/GitHub integration
+  - workspace creation/reuse
+  - environment bootstrap
+  - test execution
+  - PR flow
+
+  Goose owns
+
+  - session continuity
+  - recipe-driven execution
+  - provider/model runtime
+  - tool-enabled coding loop
 
 Axle now runs Goose with a stable workspace session, a bundled recipe, and structured output. That means `axle run KAN-2 --chat` continues the same Goose session instead of rebuilding the whole task string from scratch.
 
@@ -137,23 +224,6 @@ axle doctor
 axle smoke
 ```
 
-The smoke run uses the current provider/model/recipe, starts a real Goose session in the prepared workspace, and reports structured status, tool, and error events without requiring a full implementation task.
-
-## Smoke Tests
-
-Real-provider smoke runs are opt-in and only run when you provide the inputs explicitly.
-
-```bash
-AXLE_SMOKE_REPO=/absolute/path/to/project \
-AXLE_SMOKE_TASK="Add a focused test for the latest change." \
-AXLE_SMOKE_TEST_COMMAND="python manage.py test" \
-AXLE_SMOKE_PROVIDER=ollama \
-AXLE_SMOKE_MODEL=qwen2.5-coder:14b \
-python -m unittest tests.test_setup_features.SetupFeatureTests.test_real_provider_smoke_run_hook
-```
-
-Use the same hook with a hosted provider by pointing `AXLE_SMOKE_PROVIDER` and `AXLE_SMOKE_MODEL` at the configured model runtime. The test skips unless the required env vars are present.
-
 ## Short Demo Flow
 
 ```bash
@@ -170,11 +240,3 @@ For an interactive follow-up loop after the first run:
 ```bash
 axle run KAN-2 --chat
 ```
-
-Inside interactive mode:
-- plain text resumes the same Goose session with a follow-up instruction
-- `/status` prints the latest run summary
-- `/diff` prints the current repository diff
-- `/retry` resumes the current Goose session without extra instructions
-- `/create_pr` commits, pushes, and opens a GitHub PR from the current workspace
-- `/exit` leaves interactive mode
