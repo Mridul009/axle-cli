@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 from pathlib import Path
 
 from .config import settings
@@ -8,7 +9,14 @@ from .models import TestResult
 from .terminal import Terminal
 
 
-def run_test_command(repo_dir: Path, command: str, log_path: Path, terminal: Terminal) -> TestResult:
+def run_test_command(
+    repo_dir: Path,
+    command: str,
+    log_path: Path,
+    terminal: Terminal,
+    *,
+    env: dict[str, str] | None = None,
+) -> TestResult:
     terminal.step("Testing", f"Running `{command}`")
     process = subprocess.Popen(
         ["sh", "-lc", command],
@@ -16,6 +24,7 @@ def run_test_command(repo_dir: Path, command: str, log_path: Path, terminal: Ter
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        env=(env or os.environ.copy()),
     )
     lines: list[str] = [f"$ {command}", ""]
     timed_out = False
@@ -35,6 +44,9 @@ def run_test_command(repo_dir: Path, command: str, log_path: Path, terminal: Ter
             terminal.stream("test", line)
         lines.append(f"[axle] Command timed out after {settings.test_timeout_seconds}s.")
         exit_code = 124
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
     output = "\n".join(lines).strip() + "\n"
     log_path.write_text(output, encoding="utf-8")
     return TestResult(command=command, exit_code=exit_code, output=output, timed_out=timed_out)

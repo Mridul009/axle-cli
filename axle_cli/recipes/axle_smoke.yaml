@@ -1,0 +1,18 @@
+version: 1.0.0
+title: Axle Smoke Session
+description: Safe Axle smoke workflow for provider and session verification.
+instructions: |
+  Use this recipe only for smoke and inspection runs.
+  Inspect the repository and report one concrete implementation area or observation.
+  Do not modify repository files.
+  Do not print tool payload JSON, shell payloads, or fenced command objects as your response.
+  If you need to inspect the repository, use the available tools directly.
+  Keep the response brief and user-facing.
+prompt: |
+  {{ task_prompt }}
+parameters:
+  - key: task_prompt
+    input_type: string
+    requirement: required
+    description: Rendered Axle smoke prompt for the current repository session.
+activities: []
