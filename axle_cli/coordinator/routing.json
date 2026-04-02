@@ -1,0 +1,55 @@
+{
+  "precedence": ["defaults", "saved_config", "projects", "rules"],
+  "defaults": {
+    "repository": "git@github.com:acme/widgets.git",
+    "base_branch": "main",
+    "test_command": "pytest -q",
+    "provider": "openai",
+    "model": "gpt-5-mini"
+  },
+  "profiles": {
+    "frontend-base": {
+      "repository": "git@github.com:acme/frontend.git",
+      "provider": "openrouter"
+    },
+    "frontend": {
+      "inherits": "frontend-base",
+      "base_branch": "develop",
+      "model": "qwen/qwen3-coder:free"
+    }
+  },
+  "projects": {
+    "KAN": {
+      "repository": "https://github.com/Mridul009/lister",
+      "base_branch": "main",
+      "test_command": "python manage.py test"
+    },
+    "APP": {
+      "profile": "frontend",
+      "test_command": "npm test"
+    }
+  },
+  "rules": [
+    {
+      "priority": 20,
+      "match": {
+        "project": "APP",
+        "labels": ["frontend", "ui"],
+        "components": ["dashboard"]
+      },
+      "test_command": "npm test -- --runInBand"
+    },
+    {
+      "priority": 10,
+      "match": {
+        "project": "OPS",
+        "labels": ["infra"]
+      },
+      "repository": "git@github.com:acme/platform.git",
+      "base_branch": "main",
+      "test_command": "pytest -q tests/integration",
+      "provider": "openai",
+      "model": "gpt-5-mini"
+    }
+  ]
+}

@@ -18,7 +18,7 @@ from subprocess import CompletedProcess
 from unittest import mock
 
 from axle_cli import doctor
-from axle_cli.models import SavedConfig
+from axle_cli.models import RunRequest, SavedConfig
 
 
 class SetupFeatureTests(unittest.TestCase):
@@ -213,6 +213,34 @@ class SetupFeatureTests(unittest.TestCase):
         self.assertEqual(checks["LLM provider"].details["provider"], "ollama")
         self.assertEqual(checks["LLM provider"].details["model"], "qwen2.5-coder:1.5b")
 
+    def test_prepare_workspace_rotates_goose_session_when_provider_changes(self):
+        self._temp_runtime()
+        repo_module = importlib.import_module("axle_cli.repo")
+        importlib.reload(repo_module)
+
+        source_repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, source_repo, ignore_errors=True)
+        (source_repo / "README.md").write_text("demo\n", encoding="utf-8")
+
+        request = RunRequest(
+            task="demo",
+            repository=str(source_repo),
+            repository_kind="local",
+            base_branch="main",
+        )
+        openai_config = SavedConfig(llm_provider="openai", llm_model="gpt-5-mini")
+        ollama_config = SavedConfig(llm_provider="ollama", llm_model="qwen2.5-coder:7b")
+
+        first = repo_module.prepare_workspace(request, github_token=None, config=openai_config)
+        second = repo_module.prepare_workspace(request, github_token=None, config=ollama_config)
+
+        self.assertEqual(first.root, second.root)
+        self.assertNotEqual(first.goose_session_name, second.goose_session_name)
+        metadata = repo_module.load_workspace_metadata(second.root)
+        self.assertIsNotNone(metadata)
+        self.assertEqual(metadata.llm_provider, "ollama")
+        self.assertEqual(metadata.llm_model, "qwen2.5-coder:7b")
+
     def test_doctor_reports_configuration_health(self):
         config = SavedConfig(
             github_token="gh-token",
@@ -346,6 +374,12 @@ class SetupFeatureTests(unittest.TestCase):
                         },
                     ],
                 },
+                "project": {"key": "APP", "name": "Analytics Platform"},
+                "issuetype": {"name": "Bug"},
+                "labels": ["frontend", "urgent"],
+                "components": [{"name": "dashboard"}],
+                "priority": {"name": "High"},
+                "status": {"name": "In Progress"},
                 "comment": {
                     "comments": [
                         {
@@ -373,6 +407,16 @@ class SetupFeatureTests(unittest.TestCase):
         self.assertIn("Broken in production", rendered)
         self.assertIn("- Check SQL", rendered)
         self.assertIn("Alex at 2026-03-26T10:00:00.000+0000", rendered)
+        self.assertEqual(issue["project_key"], "APP")
+        self.assertEqual(issue["issue_type"], "Bug")
+        self.assertEqual(issue["labels"], ["frontend", "urgent"])
+        self.assertEqual(issue["components"], ["dashboard"])
+        self.assertEqual(issue["priority"], "High")
+        self.assertEqual(issue["status"], "In Progress")
+        self.assertIn("Routing metadata:", task_text)
+        self.assertIn("project=APP", task_text)
+        self.assertIn("labels=frontend, urgent", task_text)
+        self.assertIn("components=dashboard", task_text)
         self.assertIn("Additional operator instructions:", task_text)
         jira_get.assert_called_once()
 
@@ -1238,6 +1282,60 @@ class SetupFeatureTests(unittest.TestCase):
         self.assertIn("without source-file changes", result.summary)
         self.assertIn("Step 1", result.transcript_excerpt)
         self.assertEqual(result.likely_files, [])
+
+    def test_goose_runner_times_out_and_reports_clean_failure(self):
+        goose_runner = importlib.import_module("axle_cli.goose_runner")
+        importlib.reload(goose_runner)
+        from axle_cli.models import Workspace
+
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root = Path(tempdir.name)
+        repo_dir = root / "repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+        script = root / "slow_goose.py"
+        script.write_text(
+            "\n".join(
+                [
+                    "import time",
+                    "print('{\"message\":\"starting\"}', flush=True)",
+                    "time.sleep(3)",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+        workspace = Workspace(
+            run_id="run-timeout",
+            workspace_key="workspace-key",
+            root=root,
+            repo_dir=repo_dir,
+            transcript_path=root / "goose-transcript.log",
+            prompt_path=root / "goose-prompt.md",
+            diff_path=root / "changes.patch",
+            test_log_path=root / "test.log",
+        )
+        config = SavedConfig(
+            goose_binary="python3",
+            goose_builtin="developer",
+            llm_provider="ollama",
+            llm_model="qwen2.5-coder:7b",
+        )
+
+        original_timeout = goose_runner.settings.goose_timeout_seconds
+        object.__setattr__(goose_runner.settings, "goose_timeout_seconds", 1)
+        self.addCleanup(lambda: object.__setattr__(goose_runner.settings, "goose_timeout_seconds", original_timeout))
+
+        with mock.patch.object(goose_runner, "build_command", return_value=["python3", str(script)]):
+            result = goose_runner.run_goose(config, workspace, "inspect the repo", goose_runner.Terminal(verbose=False))
+
+        self.assertEqual(result.exit_code, 124)
+        self.assertEqual(result.output_kind, "timeout")
+        self.assertIn("timed out", result.summary)
 
     def test_session_runner_uses_fallback_model_on_noop_retry(self):
         self._temp_runtime()

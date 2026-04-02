@@ -4,13 +4,15 @@ import json
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from .bootstrap import workspace_command_env
+from .config import settings
 from .models import GooseRunResult, SavedConfig, Workspace
 from .repo import diff_text, goose_session_name_for_workspace, source_changed_files
-from .terminal import Terminal
+from .terminal import ExecutionSink, Terminal
 
 
 class GooseError(RuntimeError):
@@ -464,7 +466,7 @@ def _collect_event_summary(event: dict[str, object]) -> GooseEventSummary:
     )
 
 
-def stream_events(process: subprocess.Popen[str], terminal: Terminal) -> tuple[list[str], list[str], bool, GooseEventSummary]:
+def stream_events(process: subprocess.Popen[str], terminal: ExecutionSink) -> tuple[list[str], list[str], bool, GooseEventSummary]:
     raw_lines: list[str] = []
     rendered_lines: list[str] = []
     structured_output = False
@@ -511,6 +513,7 @@ def collect_result(
     *,
     structured_output: bool,
     event_summary: GooseEventSummary,
+    timed_out: bool = False,
 ) -> GooseRunResult:
     transcript = "\n".join([f"$ {' '.join(invocation.command)}", "", *raw_lines]).strip() + "\n"
     workspace.transcript_path.write_text(transcript, encoding="utf-8")
@@ -559,7 +562,10 @@ def collect_result(
                 summary = f"{parsed_status}: {summary}"
         elif event_summary.rendered_lines or event_summary.files:
             output_kind = "structured-json"
-    if exit_code != 0:
+    if timed_out:
+        summary = f"Goose timed out after {settings.goose_timeout_seconds} seconds."
+        output_kind = "timeout"
+    elif exit_code != 0:
         summary = f"Goose exited with status {exit_code}: {summary}"
     elif patch_applied:
         summary = "Goose transcript contained a recoverable patch and it was applied successfully."
@@ -599,7 +605,7 @@ def run_goose(
     config: SavedConfig,
     workspace: Workspace,
     prompt_text: str,
-    terminal: Terminal,
+    terminal: ExecutionSink,
     *,
     model: str | None = None,
     provider: str | None = None,
@@ -651,6 +657,19 @@ def run_goose(
         text=True,
         env=invocation.env,
     )
+    timed_out = False
+
+    def _kill_on_timeout() -> None:
+        nonlocal timed_out
+        if process.poll() is not None:
+            return
+        timed_out = True
+        terminal.error(f"Goose exceeded the {settings.goose_timeout_seconds}-second timeout. Terminating the run.")
+        process.kill()
+
+    timeout_timer = threading.Timer(settings.goose_timeout_seconds, _kill_on_timeout)
+    timeout_timer.daemon = True
+    timeout_timer.start()
     try:
         raw_lines, rendered_lines, structured_output, event_summary = stream_events(process, terminal)
         exit_code = process.wait()
@@ -658,8 +677,12 @@ def run_goose(
         process.kill()
         raise GooseError(f"Failed to start Goose: {exc}") from exc
     finally:
+        timeout_timer.cancel()
         if process.stdout is not None:
             process.stdout.close()
+
+    if timed_out:
+        exit_code = 124
 
     return collect_result(
         workspace,
@@ -669,4 +692,5 @@ def run_goose(
         rendered_lines,
         structured_output=structured_output,
         event_summary=event_summary,
+        timed_out=timed_out,
     )

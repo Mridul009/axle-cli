@@ -45,4 +45,6 @@ COPY axle_cli /app/axle_cli
 
 RUN pip install -e .
 
+EXPOSE 8080
+
 CMD ["axle", "status"]

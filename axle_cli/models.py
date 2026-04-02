@@ -11,6 +11,14 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _serialize_datetime(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _deserialize_datetime(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
 @dataclass(frozen=True)
 class RepositorySource:
     value: str
@@ -34,6 +42,9 @@ class WorkspaceMetadata:
     source_path: str | None = None
     run_id: str | None = None
     goose_session_name: str | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_base_url: str | None = None
     prepared_at: datetime = field(default_factory=utc_now)
     updated_at: datetime | None = None
 
@@ -55,6 +66,9 @@ class WorkspaceMetadata:
             source_path=payload.get("source_path"),
             run_id=payload.get("run_id"),
             goose_session_name=payload.get("goose_session_name"),
+            llm_provider=payload.get("llm_provider"),
+            llm_model=payload.get("llm_model"),
+            llm_base_url=payload.get("llm_base_url"),
             prepared_at=datetime.fromisoformat(prepared_at) if prepared_at else utc_now(),
             updated_at=datetime.fromisoformat(updated_at) if updated_at else None,
         )
@@ -202,3 +216,212 @@ class RunSummary:
     failure: str | None = None
     started_at: datetime = field(default_factory=utc_now)
     finished_at: datetime | None = None
+
+
+@dataclass
+class RunEvent:
+    timestamp: datetime = field(default_factory=utc_now)
+    kind: str = "info"
+    stage: str | None = None
+    message: str = ""
+    details: dict[str, str] = field(default_factory=dict)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "timestamp": _serialize_datetime(self.timestamp),
+            "kind": self.kind,
+            "stage": self.stage,
+            "message": self.message,
+            "details": self.details,
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "RunEvent":
+        return cls(
+            timestamp=_deserialize_datetime(payload.get("timestamp")) or utc_now(),
+            kind=str(payload.get("kind") or "info"),
+            stage=str(payload["stage"]) if payload.get("stage") is not None else None,
+            message=str(payload.get("message") or ""),
+            details=dict(payload.get("details") or {}),
+        )
+
+
+@dataclass
+class WorkerLaunchSpec:
+    run_id: str
+    callback_token: str
+    instance_name: str
+    coordinator_url: str | None = None
+    user_data: str | None = None
+    bootstrap_manifest: dict[str, Any] = field(default_factory=dict)
+    launch_config: dict[str, Any] = field(default_factory=dict)
+    terminate_on_finish: bool = True
+    instance_id: str | None = None
+    status: str = "pending"
+    launched_at: datetime | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "callback_token": self.callback_token,
+            "instance_name": self.instance_name,
+            "coordinator_url": self.coordinator_url,
+            "user_data": self.user_data,
+            "bootstrap_manifest": self.bootstrap_manifest,
+            "launch_config": self.launch_config,
+            "terminate_on_finish": self.terminate_on_finish,
+            "instance_id": self.instance_id,
+            "status": self.status,
+            "launched_at": _serialize_datetime(self.launched_at),
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "WorkerLaunchSpec":
+        return cls(
+            run_id=payload["run_id"],
+            callback_token=payload["callback_token"],
+            instance_name=payload["instance_name"],
+            coordinator_url=payload.get("coordinator_url"),
+            user_data=payload.get("user_data"),
+            bootstrap_manifest=dict(payload.get("bootstrap_manifest") or {}),
+            launch_config=dict(payload.get("launch_config") or {}),
+            terminate_on_finish=bool(payload.get("terminate_on_finish", True)),
+            instance_id=payload.get("instance_id"),
+            status=str(payload.get("status") or "pending"),
+            launched_at=_deserialize_datetime(payload.get("launched_at")),
+        )
+
+
+@dataclass
+class AutomationRun:
+    run_id: str
+    issue_key: str
+    issue_url: str
+    repository: str
+    base_branch: str
+    task: str
+    callback_url: str | None = None
+    test_command: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    create_pr: bool = True
+    repository_path: str | None = None
+    repository_kind: Literal["auto", "remote", "local"] = "auto"
+    setup_mode: Literal["auto", "skip"] = "auto"
+    max_repair_attempts: int = 1
+    retry_count: int = 0
+    max_retries: int = 1
+    status: str = "queued"
+    worker_instance_id: str | None = None
+    worker_launch_spec: WorkerLaunchSpec | None = None
+    callback_token: str = field(default_factory=lambda: uuid4().hex)
+    branch_name: str | None = None
+    pr_url: str | None = None
+    workspace: str | None = None
+    failure: str | None = None
+    result: str | None = None
+    recovery_state: str | None = None
+    recovery_reason: str | None = None
+    last_recovery_at: datetime | None = None
+    orphaned_at: datetime | None = None
+    changed_files: list[str] = field(default_factory=list)
+    events: list[RunEvent] = field(default_factory=list)
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "issue_key": self.issue_key,
+            "issue_url": self.issue_url,
+            "repository": self.repository,
+            "base_branch": self.base_branch,
+            "task": self.task,
+            "callback_url": self.callback_url,
+            "test_command": self.test_command,
+            "provider": self.provider,
+            "model": self.model,
+            "create_pr": self.create_pr,
+            "repository_path": self.repository_path,
+            "repository_kind": self.repository_kind,
+            "setup_mode": self.setup_mode,
+            "max_repair_attempts": self.max_repair_attempts,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "status": self.status,
+            "worker_instance_id": self.worker_instance_id,
+            "worker_launch_spec": self.worker_launch_spec.to_json() if self.worker_launch_spec else None,
+            "callback_token": self.callback_token,
+            "branch_name": self.branch_name,
+            "pr_url": self.pr_url,
+            "workspace": self.workspace,
+            "failure": self.failure,
+            "result": self.result,
+            "recovery_state": self.recovery_state,
+            "recovery_reason": self.recovery_reason,
+            "last_recovery_at": _serialize_datetime(self.last_recovery_at),
+            "orphaned_at": _serialize_datetime(self.orphaned_at),
+            "changed_files": self.changed_files,
+            "events": [event.to_json() for event in self.events],
+            "created_at": _serialize_datetime(self.created_at),
+            "updated_at": _serialize_datetime(self.updated_at),
+            "finished_at": _serialize_datetime(self.finished_at),
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "AutomationRun":
+        return cls(
+            run_id=payload["run_id"],
+            issue_key=payload["issue_key"],
+            issue_url=payload["issue_url"],
+            repository=payload["repository"],
+            base_branch=payload["base_branch"],
+            task=payload["task"],
+            callback_url=payload.get("callback_url"),
+            test_command=payload.get("test_command"),
+            provider=payload.get("provider"),
+            model=payload.get("model"),
+            create_pr=bool(payload.get("create_pr", True)),
+            repository_path=payload.get("repository_path"),
+            repository_kind=payload.get("repository_kind", "auto"),
+            setup_mode=payload.get("setup_mode", "auto"),
+            max_repair_attempts=int(payload.get("max_repair_attempts", 1)),
+            retry_count=int(payload.get("retry_count", 0)),
+            max_retries=int(payload.get("max_retries", 1)),
+            status=str(payload.get("status") or "queued"),
+            worker_instance_id=payload.get("worker_instance_id"),
+            worker_launch_spec=WorkerLaunchSpec.from_json(payload["worker_launch_spec"]) if payload.get("worker_launch_spec") else None,
+            callback_token=payload.get("callback_token") or uuid4().hex,
+            branch_name=payload.get("branch_name"),
+            pr_url=payload.get("pr_url"),
+            workspace=payload.get("workspace"),
+            failure=payload.get("failure"),
+            result=payload.get("result"),
+            recovery_state=payload.get("recovery_state"),
+            recovery_reason=payload.get("recovery_reason"),
+            last_recovery_at=_deserialize_datetime(payload.get("last_recovery_at")),
+            orphaned_at=_deserialize_datetime(payload.get("orphaned_at")),
+            changed_files=list(payload.get("changed_files") or []),
+            events=[RunEvent.from_json(item) for item in payload.get("events") or []],
+            created_at=_deserialize_datetime(payload.get("created_at")) or utc_now(),
+            updated_at=_deserialize_datetime(payload.get("updated_at")),
+            finished_at=_deserialize_datetime(payload.get("finished_at")),
+        )
+
+    def to_run_request(self) -> RunRequest:
+        return RunRequest(
+            task=self.task,
+            task_context=self.task,
+            repository=self.repository,
+            base_branch=self.base_branch,
+            repository_path=self.repository_path,
+            repository_kind=self.repository_kind,
+            setup_mode=self.setup_mode,
+            test_command=self.test_command,
+            create_pr=self.create_pr,
+            model=self.model,
+            provider=self.provider,
+            max_repair_attempts=self.max_repair_attempts,
+            reuse_workspace=False,
+        )

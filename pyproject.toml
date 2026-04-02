@@ -9,10 +9,15 @@ dependencies = [
 
 [project.scripts]
 axle = "axle_cli.main:main"
+axle-demo-coordinator = "axle_cli.demo:coordinator_main"
+axle-demo-worker = "axle_cli.demo:worker_main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["axle_cli"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["axle_cli*"]

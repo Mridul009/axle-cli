@@ -1,0 +1,17 @@
+[Unit]
+Description=Axle Coordinator API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/axle-cli
+Environment=AXLE_CLI_HOME=/var/lib/axle-cli
+EnvironmentFile=-/etc/axle-coordinator.env
+ExecStart=/opt/axle-cli/.venv/bin/axle coordinator serve --host 0.0.0.0 --port 8080 --admin-token ${AXLE_ADMIN_TOKEN} --worker-token ${AXLE_WORKER_TOKEN}
+Restart=always
+RestartSec=5
+User=axle
+Group=axle
+
+[Install]
+WantedBy=multi-user.target

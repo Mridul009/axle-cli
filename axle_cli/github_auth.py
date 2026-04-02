@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError:  # pragma: no cover
+    class _MissingRequests:
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError("The `requests` package is required for GitHub API operations.")
+
+    requests = _MissingRequests()
 
 from .models import SavedConfig
 from .state import load_config, save_config

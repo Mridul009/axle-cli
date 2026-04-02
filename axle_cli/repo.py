@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from .config import settings
-from .models import RepositorySource, RunRequest, Workspace, WorkspaceMetadata
+from .models import RepositorySource, RunRequest, SavedConfig, Workspace, WorkspaceMetadata
 
 
 class RepoError(RuntimeError):
@@ -112,6 +112,26 @@ def workspace_key_for_source(source: RepositorySource, base_branch: str) -> str:
 
 def goose_session_name_for_workspace(workspace_key: str) -> str:
     return f"axle-{workspace_key}"
+
+
+def goose_session_name_for_runtime(
+    workspace_key: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    signature = "|".join(
+        [
+            (provider or "").strip().lower(),
+            (model or "").strip(),
+            (base_url or "").strip().rstrip("/"),
+        ]
+    )
+    if not signature.strip("|"):
+        return goose_session_name_for_workspace(workspace_key)
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:8]
+    return f"{goose_session_name_for_workspace(workspace_key)}-{digest}"
 
 
 def workspace_root_for_source(source: RepositorySource, base_branch: str, run_id: str | None = None, *, reuse_workspace: bool = True) -> Path:
@@ -239,7 +259,7 @@ def clone_or_copy_repo(
     return source.value
 
 
-def prepare_workspace(request: RunRequest, github_token: str | None) -> Workspace:
+def prepare_workspace(request: RunRequest, github_token: str | None, config: SavedConfig | None = None) -> Workspace:
     run_id = str(uuid4())
     source = repository_source(
         request.repository,
@@ -250,6 +270,9 @@ def prepare_workspace(request: RunRequest, github_token: str | None) -> Workspac
     root = workspace_root_for_source(source, request.base_branch, run_id, reuse_workspace=getattr(request, "reuse_workspace", True))
     repo_dir = root / "repo"
     existing_metadata = load_workspace_metadata(root)
+    selected_provider = (request.provider or (config.llm_provider if config else None) or "").strip() or None
+    selected_model = (request.model or (config.llm_model if config else None) or "").strip() or None
+    selected_base_url = ((config.llm_base_url if config else None) or "").strip().rstrip("/") or None
     repo_dir.mkdir(parents=True, exist_ok=True)
     clone_or_copy_repo(
         source.value,
@@ -266,7 +289,23 @@ def prepare_workspace(request: RunRequest, github_token: str | None) -> Workspac
         source_kind=source.kind,
         source_path=str(source.path) if source.path else None,
         run_id=run_id,
-        goose_session_name=(existing_metadata.goose_session_name if existing_metadata and existing_metadata.goose_session_name else goose_session_name_for_workspace(workspace_key)),
+        goose_session_name=(
+            existing_metadata.goose_session_name
+            if existing_metadata
+            and existing_metadata.goose_session_name
+            and (existing_metadata.llm_provider or "").strip() == (selected_provider or "")
+            and (existing_metadata.llm_model or "").strip() == (selected_model or "")
+            and ((existing_metadata.llm_base_url or "").strip().rstrip("/") == (selected_base_url or ""))
+            else goose_session_name_for_runtime(
+                workspace_key,
+                provider=selected_provider,
+                model=selected_model,
+                base_url=selected_base_url,
+            )
+        ),
+        llm_provider=selected_provider,
+        llm_model=selected_model,
+        llm_base_url=selected_base_url,
     )
     metadata_path = save_workspace_metadata(root, metadata)
     return Workspace(

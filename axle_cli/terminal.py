@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import sys
+from typing import Callable, Protocol
 
 from .doctor import DoctorReport
 from .models import RunSummary
@@ -11,25 +12,44 @@ def _stamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
+class ExecutionSink(Protocol):
+    def info(self, message: str) -> None: ...
+    def step(self, title: str, message: str) -> None: ...
+    def stream(self, prefix: str, line: str) -> None: ...
+    def error(self, message: str) -> None: ...
+    def command(self, command: str) -> None: ...
+
+
 class Terminal:
-    def __init__(self, verbose: bool = True) -> None:
+    def __init__(self, verbose: bool = True, event_handler: Callable[[dict[str, str]], None] | None = None) -> None:
         self.verbose = verbose
+        self.event_handler = event_handler
+
+    def _emit(self, kind: str, **payload: str) -> None:
+        if self.event_handler:
+            event = {"kind": kind, **payload}
+            self.event_handler(event)
 
     def info(self, message: str) -> None:
+        self._emit("info", message=message)
         print(f"[{_stamp()}] {message}")
 
     def step(self, title: str, message: str) -> None:
+        self._emit("step", stage=title, message=message)
         print(f"[{_stamp()}] {title}: {message}")
 
     def stream(self, prefix: str, line: str) -> None:
+        self._emit("stream", prefix=prefix, message=line)
         if not self.verbose:
             return
         print(f"[{_stamp()}] {prefix} | {line}")
 
     def error(self, message: str) -> None:
+        self._emit("error", message=message)
         print(f"[{_stamp()}] ERROR: {message}", file=sys.stderr)
 
     def command(self, command: str) -> None:
+        self._emit("command", command=command)
         print(f"[{_stamp()}] $ {command}")
 
     def summary(self, summary: RunSummary) -> None:
@@ -75,3 +95,26 @@ class Terminal:
             print(f"{prefix}: {check.name} - {check.message}")
             for key, value in check.details.items():
                 print(f"  {key}: {value}")
+
+
+class BufferedExecutionSink:
+    def __init__(self) -> None:
+        self.events: list[dict[str, str]] = []
+
+    def _append(self, kind: str, **payload: str) -> None:
+        self.events.append({"kind": kind, **payload})
+
+    def info(self, message: str) -> None:
+        self._append("info", message=message)
+
+    def step(self, title: str, message: str) -> None:
+        self._append("step", stage=title, message=message)
+
+    def stream(self, prefix: str, line: str) -> None:
+        self._append("stream", prefix=prefix, message=line)
+
+    def error(self, message: str) -> None:
+        self._append("error", message=message)
+
+    def command(self, command: str) -> None:
+        self._append("command", command=command)

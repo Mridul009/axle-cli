@@ -1,0 +1,45 @@
+services:
+  coordinator:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command:
+      - axle
+      - coordinator
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --admin-token
+      - ${AXLE_ADMIN_TOKEN}
+      - --worker-token
+      - ${AXLE_WORKER_TOKEN}
+    environment:
+      AXLE_CLI_HOME: /data/.axle-cli
+    ports:
+      - "8080:8080"
+    volumes:
+      - axle_cli_data:/data/.axle-cli
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command:
+      - axle
+      - worker
+      - poll
+      - --coordinator-url
+      - http://coordinator:8080
+      - --worker-token
+      - ${AXLE_WORKER_TOKEN}
+    depends_on:
+      - coordinator
+    environment:
+      AXLE_CLI_HOME: /data/.axle-cli
+    volumes:
+      - axle_cli_data:/data/.axle-cli
+
+volumes:
+  axle_cli_data:

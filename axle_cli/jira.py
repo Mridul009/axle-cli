@@ -3,8 +3,23 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-import requests
-from requests.auth import HTTPBasicAuth
+try:
+    import requests
+    from requests.auth import HTTPBasicAuth
+except ModuleNotFoundError:  # pragma: no cover
+    class _MissingRequests:
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError("The `requests` package is required for Jira API operations.")
+
+        def post(self, *_args, **_kwargs):
+            raise RuntimeError("The `requests` package is required for Jira API operations.")
+
+    requests = _MissingRequests()
+
+    class HTTPBasicAuth:  # type: ignore[override]
+        def __init__(self, username: str, password: str) -> None:
+            self.username = username
+            self.password = password
 
 from .models import SavedConfig
 from .state import load_config, save_config
@@ -111,24 +126,46 @@ def _adf_text(node: Any) -> str:
     return ""
 
 
-def fetch_jira_issue(config: SavedConfig, issue_key: str) -> dict[str, Any]:
-    normalized_issue_key = issue_key.strip().upper()
-    if not normalized_issue_key:
-        raise ValueError("A Jira issue key is required.")
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
 
-    base_url, email, api_token = _require_jira_credentials(config)
-    response = requests.get(
-        f"{base_url}/rest/api/3/issue/{normalized_issue_key}",
-        headers=_jira_headers(),
-        auth=_jira_auth(email, api_token),
-        params={
-            "fields": "summary,description,comment",
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    fields = payload.get("fields", {})
+
+def _as_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if not isinstance(value, list):
+        item = _as_text(value)
+        return [item] if item else []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            candidate = _as_text(item.get("name") or item.get("key") or item.get("value"))
+        else:
+            candidate = _as_text(item)
+        if candidate:
+            result.append(candidate)
+    return list(dict.fromkeys(result))
+
+
+def normalize_jira_issue(payload: dict[str, Any], *, base_url: str | None = None) -> dict[str, Any]:
+    issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else payload
+    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else payload.get("fields")
+    fields = fields if isinstance(fields, dict) else {}
+
+    project = fields.get("project") if isinstance(fields.get("project"), dict) else {}
+    issue_type = fields.get("issuetype") if isinstance(fields.get("issuetype"), dict) else {}
+    priority = fields.get("priority") if isinstance(fields.get("priority"), dict) else {}
+    status = fields.get("status") if isinstance(fields.get("status"), dict) else {}
+    assignee = fields.get("assignee") if isinstance(fields.get("assignee"), dict) else {}
+    reporter = fields.get("reporter") if isinstance(fields.get("reporter"), dict) else {}
+    parent = fields.get("parent") if isinstance(fields.get("parent"), dict) else {}
+
     comment_block = fields.get("comment") or {}
     raw_comments = comment_block.get("comments") or []
     comments: list[dict[str, str]] = []
@@ -142,13 +179,78 @@ def fetch_jira_issue(config: SavedConfig, issue_key: str) -> dict[str, Any]:
             }
         )
 
-    return {
-        "key": payload.get("key", normalized_issue_key),
-        "summary": (fields.get("summary") or "").strip() or "(no summary)",
-        "description": _adf_text(fields.get("description")).strip() or "(no description)",
+    key = _as_text(issue.get("key") or payload.get("issue_key") or payload.get("key"))
+    normalized = {
+        "key": key,
+        "summary": _as_text(fields.get("summary") or payload.get("summary")) or "(no summary)",
+        "description": _adf_text(fields.get("description") or payload.get("description")).strip() or "(no description)",
         "comments": comments,
-        "url": f"{base_url}/browse/{payload.get('key', normalized_issue_key)}",
+        "project_key": _as_text(project.get("key") or payload.get("project_key") or payload.get("projectKey")),
+        "project_name": _as_text(project.get("name") or payload.get("project_name")),
+        "issue_type": _as_text(issue_type.get("name") or payload.get("issue_type")),
+        "labels": _as_text_list(fields.get("labels") or payload.get("labels")),
+        "components": _as_text_list(fields.get("components") or payload.get("components")),
+        "priority": _as_text(priority.get("name") or payload.get("priority")),
+        "status": _as_text(status.get("name") or payload.get("status")),
+        "assignee": _as_text(assignee.get("displayName") or payload.get("assignee")),
+        "reporter": _as_text(reporter.get("displayName") or payload.get("reporter")),
+        "parent_key": _as_text(parent.get("key") or payload.get("parent_key")),
     }
+    if base_url:
+        normalized["url"] = f"{base_url.rstrip('/')}/browse/{key or _as_text(payload.get('key'))}"
+    else:
+        normalized["url"] = _as_text(payload.get("url"))
+    return normalized
+
+
+def fetch_jira_issue(config: SavedConfig, issue_key: str) -> dict[str, Any]:
+    normalized_issue_key = issue_key.strip().upper()
+    if not normalized_issue_key:
+        raise ValueError("A Jira issue key is required.")
+
+    base_url, email, api_token = _require_jira_credentials(config)
+    response = requests.get(
+        f"{base_url}/rest/api/3/issue/{normalized_issue_key}",
+        headers=_jira_headers(),
+        auth=_jira_auth(email, api_token),
+        params={
+            "fields": "summary,description,comment,project,issuetype,labels,components,priority,status,assignee,reporter,parent",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return normalize_jira_issue(response.json(), base_url=base_url)
+
+
+def add_jira_comment(config: SavedConfig, issue_key: str, body: str) -> dict[str, Any]:
+    normalized_issue_key = issue_key.strip().upper()
+    if not normalized_issue_key:
+        raise ValueError("A Jira issue key is required.")
+    comment_body = body.strip()
+    if not comment_body:
+        raise ValueError("Jira comment body cannot be empty.")
+
+    base_url, email, api_token = _require_jira_credentials(config)
+    response = requests.post(
+        f"{base_url}/rest/api/3/issue/{normalized_issue_key}/comment",
+        headers={**_jira_headers(), "Content-Type": "application/json"},
+        auth=_jira_auth(email, api_token),
+        json={
+            "body": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": comment_body}],
+                    }
+                ],
+            }
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def format_jira_issue(issue: dict[str, Any]) -> str:
@@ -180,10 +282,24 @@ def jira_issue_task_text(issue: dict[str, Any], extra_instructions: str | None =
     lines = [
         f"Jira issue: {issue['key']}",
         f"Summary: {issue['summary']}",
-        "",
-        "Description:",
-        issue["description"],
     ]
+    routing_bits: list[str] = []
+    if issue.get("project_key"):
+        routing_bits.append(f"project={issue['project_key']}")
+    if issue.get("issue_type"):
+        routing_bits.append(f"type={issue['issue_type']}")
+    if issue.get("priority"):
+        routing_bits.append(f"priority={issue['priority']}")
+    if issue.get("status"):
+        routing_bits.append(f"status={issue['status']}")
+    if issue.get("labels"):
+        routing_bits.append(f"labels={', '.join(issue['labels'])}")
+    if issue.get("components"):
+        routing_bits.append(f"components={', '.join(issue['components'])}")
+    if routing_bits:
+        lines.extend(["", "Routing metadata:"])
+        lines.extend(f"- {item}" for item in routing_bits)
+    lines.extend(["", "Description:", issue["description"]])
     comments = issue.get("comments") or []
     if comments:
         lines.extend(["", "Comments:"])

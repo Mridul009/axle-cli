@@ -5,7 +5,14 @@ import re
 import sys
 from pathlib import Path
 
-import requests
+try:
+    import requests
+    REQUESTS_EXCEPTION = requests.RequestException
+except ModuleNotFoundError:  # pragma: no cover
+    requests = None
+
+    class REQUESTS_EXCEPTION(Exception):
+        pass
 
 from .config import settings
 from .doctor import run_doctor
@@ -79,6 +86,56 @@ def build_parser() -> argparse.ArgumentParser:
     jira_sub = jira.add_subparsers(dest="jira_command", required=True)
     jira_get = jira_sub.add_parser("get", help="Fetch a Jira issue and print its details.")
     jira_get.add_argument("issue_key", help="Jira issue key, for example APP-123.")
+
+    coordinator = subparsers.add_parser("coordinator", help="Coordinator-side automation commands.")
+    coordinator_sub = coordinator.add_subparsers(dest="coordinator_command", required=True)
+    coordinator_webhook = coordinator_sub.add_parser("webhook", help="Create an automation run from a Jira issue or webhook payload.")
+    coordinator_webhook.add_argument("--issue", required=True, help="Jira issue key.")
+    coordinator_webhook.add_argument("--launch-worker", action="store_true", help="Create a worker launch spec for the run.")
+    coordinator_webhook.add_argument("--worker-launch-mode", choices=("planned", "local", "ec2"), help="Worker launch backend to use when --launch-worker is enabled.")
+    coordinator_webhook.add_argument("--demo-local-worker", action="store_true", help="Demo shortcut for --launch-worker --worker-launch-mode local.")
+    coordinator_webhook.add_argument("--coordinator-url", help="Coordinator callback base URL for worker launch specs.")
+    coordinator_webhook.add_argument("--store-root", help="Optional coordinator store root.")
+    coordinator_serve = coordinator_sub.add_parser("serve", help="Run the coordinator HTTP API server.")
+    coordinator_serve.add_argument("--host", default="0.0.0.0", help="Bind host.")
+    coordinator_serve.add_argument("--port", type=int, default=8080, help="Bind port.")
+    coordinator_serve.add_argument("--store-root", help="Optional coordinator store root.")
+    coordinator_serve.add_argument("--artifact-root", help="Optional artifact store root.")
+    coordinator_serve.add_argument("--artifact-backend", help="Artifact store backend selector.")
+    coordinator_serve.add_argument("--admin-token", help="Bearer token for admin API routes.")
+    coordinator_serve.add_argument("--worker-token", help="Bearer token for worker registration and queue claiming.")
+    coordinator_serve.add_argument("--webhook-secret", help="Shared secret required for Jira webhook requests.")
+    coordinator_serve.add_argument("--worker-launch-mode", choices=("planned", "local", "ec2"), help="Automatically launch workers for webhook-created runs using the selected backend.")
+    coordinator_serve.add_argument("--demo-local-worker", action="store_true", help="Demo shortcut for --worker-launch-mode local.")
+    coordinator_serve.add_argument("--coordinator-url", help="Public coordinator base URL used by launched workers for callbacks.")
+    coordinator_show = coordinator_sub.add_parser("show-run", help="Show a persisted automation run.")
+    coordinator_show.add_argument("run_id", help="Automation run id.")
+    coordinator_show.add_argument("--store-root", help="Optional coordinator store root.")
+    coordinator_workers = coordinator_sub.add_parser("list-workers", help="Show registered workers.")
+    coordinator_workers.add_argument("--store-root", help="Optional coordinator store root.")
+    coordinator_recover = coordinator_sub.add_parser("recover", help="Recover stale runs by requeueing them.")
+    coordinator_recover.add_argument("--store-root", help="Optional coordinator store root.")
+    coordinator_recover.add_argument("--stale-after-seconds", type=int, default=3600, help="Treat runs older than this as stale.")
+    coordinator_recover.add_argument("--max-retries", type=int, help="Override the retry limit when recovering.")
+    coordinator_cleanup = coordinator_sub.add_parser("cleanup-orphans", help="Requeue runs owned by inactive workers.")
+    coordinator_cleanup.add_argument("--store-root", help="Optional coordinator store root.")
+    coordinator_cleanup.add_argument("--stale-after-seconds", type=int, default=300, help="Treat workers older than this as inactive.")
+    coordinator_cleanup.add_argument("--max-retries", type=int, help="Override the retry limit when cleaning orphans.")
+    coordinator_reconcile = coordinator_sub.add_parser("reconcile-ec2", help="Inspect EC2-backed worker instances and report their state.")
+    coordinator_reconcile.add_argument("--store-root", help="Optional coordinator store root.")
+
+    worker = subparsers.add_parser("worker", help="Worker-side execution commands.")
+    worker_sub = worker.add_subparsers(dest="worker_command", required=True)
+    worker_run = worker_sub.add_parser("run", help="Execute a stored automation run.")
+    worker_run.add_argument("--run-id", required=True, help="Coordinator run id.")
+    worker_run.add_argument("--callback-token", help="Run callback token.")
+    worker_run.add_argument("--store-root", help="Optional coordinator store root.")
+    worker_poll = worker_sub.add_parser("poll", help="Register over HTTP and execute queued runs.")
+    worker_poll.add_argument("--coordinator-url", required=True, help="Coordinator base URL.")
+    worker_poll.add_argument("--worker-token", help="Shared worker registration token.")
+    worker_poll.add_argument("--worker-id", help="Worker identifier.")
+    worker_poll.add_argument("--poll-interval", type=float, default=5.0, help="Seconds between queue polls.")
+    worker_poll.add_argument("--once", action="store_true", help="Claim at most one run and exit.")
 
     run = subparsers.add_parser("run", help="Run a coding task.")
     run.add_argument("--task", help="Task prompt. If omitted, stdin is used.")
@@ -390,7 +447,7 @@ def handle_smoke(args: argparse.Namespace, terminal: Terminal) -> int:
         reuse_workspace=not getattr(args, "no_reuse_workspace", False),
     )
 
-    workspace = prepare_workspace(request, config.github_token)
+    workspace = prepare_workspace(request, config.github_token, config)
     config.last_workspace = str(workspace.root)
     save_config(config)
 
@@ -434,6 +491,194 @@ def handle_jira_get(args: argparse.Namespace, terminal: Terminal) -> int:
     for line in format_jira_issue(issue).splitlines():
         terminal.info(line)
     return 0
+
+
+def handle_coordinator_webhook(args: argparse.Namespace, terminal: Terminal) -> int:
+    from .coordinator.api import CoordinatorService
+    from .coordinator.store_factory import open_run_store
+    from .coordinator.worker_launcher import build_worker_launcher
+
+    config = load_config()
+    store = open_run_store(root=getattr(args, "store_root", None))
+    worker_launch_mode = "local" if getattr(args, "demo_local_worker", False) else getattr(args, "worker_launch_mode", None)
+    if bool(args.launch_worker or getattr(args, "demo_local_worker", False)) and worker_launch_mode == "ec2" and not getattr(args, "coordinator_url", None):
+        raise ValueError("`--coordinator-url` is required when launching EC2 workers.")
+    launcher = build_worker_launcher(mode=worker_launch_mode, store_root=getattr(args, "store_root", None))
+    service = CoordinatorService(config, store=store, launcher=launcher)
+    run = service.create_run_from_issue_key(
+        args.issue,
+        launch_worker=bool(args.launch_worker or getattr(args, "demo_local_worker", False)),
+        coordinator_url=getattr(args, "coordinator_url", None),
+    )
+    terminal.info(f"Automation run created: {run.run_id}")
+    terminal.info(f"- issue: {run.issue_key}")
+    terminal.info(f"- repository: {run.repository}")
+    terminal.info(f"- status: {run.status}")
+    terminal.info(f"- callback token: {run.callback_token}")
+    if run.worker_launch_spec:
+        terminal.info(f"- worker launch status: {run.worker_launch_spec.status}")
+        terminal.info(f"- worker instance name: {run.worker_launch_spec.instance_name}")
+    return 0
+
+
+def handle_coordinator_serve(args: argparse.Namespace, terminal: Terminal) -> int:
+    from .coordinator.server import serve_coordinator
+
+    terminal.info(f"Starting coordinator API on http://{args.host}:{args.port}")
+    serve_coordinator(
+        host=args.host,
+        port=int(args.port),
+        store_root=getattr(args, "store_root", None),
+        artifact_root=getattr(args, "artifact_root", None),
+        artifact_backend=getattr(args, "artifact_backend", None),
+        admin_token=getattr(args, "admin_token", None),
+        worker_token=getattr(args, "worker_token", None),
+        webhook_secret=getattr(args, "webhook_secret", None),
+        worker_launch_mode="local" if getattr(args, "demo_local_worker", False) else getattr(args, "worker_launch_mode", None),
+        coordinator_url=getattr(args, "coordinator_url", None),
+    )
+    return 0
+
+
+def handle_coordinator_show_run(args: argparse.Namespace, terminal: Terminal) -> int:
+    from .coordinator.store_factory import open_run_store
+
+    def _progress_percent(run) -> str | None:
+        for event in reversed(run.events):
+            details = getattr(event, "details", {}) or {}
+            progress = details.get("progress_percent")
+            if isinstance(progress, str) and progress.strip():
+                return progress.strip()
+        if run.status == "completed":
+            return "100"
+        return None
+
+    store = open_run_store(root=getattr(args, "store_root", None))
+    run = store.get_run(args.run_id)
+    terminal.info(f"Run: {run.run_id}")
+    terminal.info(f"- issue: {run.issue_key}")
+    terminal.info(f"- repository: {run.repository}")
+    terminal.info(f"- provider/model: {run.provider or 'not configured'} / {run.model or 'not configured'}")
+    terminal.info(f"- status: {run.status}")
+    progress = _progress_percent(run)
+    if progress is not None:
+        terminal.info(f"- progress: {progress}%")
+    terminal.info(f"- pr: {run.pr_url or 'not created'}")
+    terminal.info(f"- failure: {run.failure or 'none'}")
+    if run.worker_launch_spec and isinstance(run.worker_launch_spec.launch_config, dict):
+        log_path = run.worker_launch_spec.launch_config.get("log_path")
+        if isinstance(log_path, str) and log_path.strip():
+            terminal.info(f"- local worker log: {log_path}")
+    if run.events:
+        terminal.info("- events:")
+        for event in run.events[-10:]:
+            stage = f"{event.stage}: " if event.stage else ""
+            terminal.info(f"  - {event.kind} {stage}{event.message}")
+    return 0
+
+
+def handle_coordinator_list_workers(args: argparse.Namespace, terminal: Terminal) -> int:
+    from .coordinator.store_factory import open_run_store
+
+    store = open_run_store(root=getattr(args, "store_root", None))
+    workers = store.list_workers()
+    if not workers:
+        terminal.info("No registered workers.")
+        return 0
+    for worker in workers:
+        terminal.info(f"- {worker.get('worker_id')} status={worker.get('status')} last_seen_at={worker.get('last_seen_at')}")
+    return 0
+
+
+def handle_coordinator_recover(args: argparse.Namespace, terminal: Terminal) -> int:
+    from .coordinator.api import CoordinatorService
+    from .coordinator.store_factory import open_run_store
+
+    store = open_run_store(root=getattr(args, "store_root", None))
+    service = CoordinatorService(load_config(), store=store)
+    recovered = service.recover_stale_runs(
+        stale_after_seconds=int(args.stale_after_seconds),
+        max_retries=getattr(args, "max_retries", None),
+    )
+    if not recovered:
+        terminal.info("No stale runs were recovered.")
+        return 0
+    for run in recovered:
+        terminal.info(f"- recovered {run.run_id}: status={run.status} retries={run.retry_count}")
+    return 0
+
+
+def handle_coordinator_cleanup_orphans(args: argparse.Namespace, terminal: Terminal) -> int:
+    from .coordinator.api import CoordinatorService
+    from .coordinator.store_factory import open_run_store
+
+    store = open_run_store(root=getattr(args, "store_root", None))
+    service = CoordinatorService(load_config(), store=store)
+    cleaned = service.cleanup_orphan_runs(
+        stale_after_seconds=int(args.stale_after_seconds),
+        max_retries=getattr(args, "max_retries", None),
+    )
+    if not cleaned:
+        terminal.info("No orphaned runs were found.")
+        return 0
+    for run in cleaned:
+        terminal.info(f"- cleaned {run.run_id}: status={run.status} retries={run.retry_count}")
+    return 0
+
+
+def handle_coordinator_reconcile_ec2(args: argparse.Namespace, terminal: Terminal) -> int:
+    from .coordinator.api import CoordinatorService
+    from .coordinator.store_factory import open_run_store
+
+    store = open_run_store(root=getattr(args, "store_root", None))
+    service = CoordinatorService(load_config(), store=store)
+    reconciled = service.reconcile_ec2_runs()
+    if not reconciled:
+        terminal.info("No EC2-backed runs required reconciliation.")
+        return 0
+    for item in reconciled:
+        terminal.info(
+            f"- {item.get('run_id')}: instance_id={item.get('instance_id') or 'none'} "
+            f"state={item.get('instance_state') or 'missing'} active={item.get('instance_active')}"
+        )
+    return 0
+
+
+def handle_worker_run(args: argparse.Namespace, terminal: Terminal) -> int:
+    from .worker.runtime import execute_run, fetch_run_payload
+    from .coordinator.store_factory import open_run_store
+
+    store = open_run_store(root=getattr(args, "store_root", None))
+    payload = fetch_run_payload(args.run_id, store=store, callback_token=getattr(args, "callback_token", None))
+    summary = execute_run(payload, config=load_config(), store=store)
+    terminal.summary(summary)
+    return 0 if summary.status == "completed" else 1
+
+
+def handle_worker_poll(args: argparse.Namespace, terminal: Terminal) -> int:
+    import socket
+    from uuid import uuid4
+
+    from .worker import main as worker_main
+
+    worker_id = getattr(args, "worker_id", None) or f"{socket.gethostname()}-{uuid4().hex[:8]}"
+    terminal.info(f"Starting remote worker poll loop as `{worker_id}`.")
+    result = worker_main(
+        [
+            "poll",
+            "--coordinator-url",
+            args.coordinator_url,
+            "--worker-id",
+            worker_id,
+            "--poll-interval",
+            str(args.poll_interval),
+            *([] if not getattr(args, "worker_token", None) else ["--worker-token", args.worker_token]),
+            *(["--once"] if getattr(args, "once", False) else []),
+        ]
+    )
+    status = getattr(result, "status", None) or (result.get("status") if isinstance(result, dict) else None)
+    terminal.info(f"Worker finished with status: {status or 'unknown'}")
+    return 0 if status in {None, "completed", "idle"} else 1
 
 
 def handle_run(args: argparse.Namespace, terminal: Terminal) -> int:
@@ -494,9 +739,27 @@ def main(argv: list[str] | None = None) -> int:
             return handle_smoke(args, terminal)
         if args.command == "jira" and args.jira_command == "get":
             return handle_jira_get(args, terminal)
+        if args.command == "coordinator" and args.coordinator_command == "webhook":
+            return handle_coordinator_webhook(args, terminal)
+        if args.command == "coordinator" and args.coordinator_command == "serve":
+            return handle_coordinator_serve(args, terminal)
+        if args.command == "coordinator" and args.coordinator_command == "show-run":
+            return handle_coordinator_show_run(args, terminal)
+        if args.command == "coordinator" and args.coordinator_command == "list-workers":
+            return handle_coordinator_list_workers(args, terminal)
+        if args.command == "coordinator" and args.coordinator_command == "recover":
+            return handle_coordinator_recover(args, terminal)
+        if args.command == "coordinator" and args.coordinator_command == "cleanup-orphans":
+            return handle_coordinator_cleanup_orphans(args, terminal)
+        if args.command == "coordinator" and args.coordinator_command == "reconcile-ec2":
+            return handle_coordinator_reconcile_ec2(args, terminal)
+        if args.command == "worker" and args.worker_command == "run":
+            return handle_worker_run(args, terminal)
+        if args.command == "worker" and args.worker_command == "poll":
+            return handle_worker_poll(args, terminal)
         if args.command == "run":
             return handle_run(args, terminal)
-    except requests.RequestException as exc:
+    except REQUESTS_EXCEPTION as exc:
         terminal.error(str(exc))
         return 1
     except ValueError as exc:

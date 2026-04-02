@@ -19,12 +19,12 @@ from .repo import (
     repo_tree,
     source_changed_files,
 )
-from .terminal import Terminal
+from .terminal import ExecutionSink, Terminal
 from .tests import run_test_command
 
 
 class SessionRunner:
-    def __init__(self, config: SavedConfig, terminal: Terminal) -> None:
+    def __init__(self, config: SavedConfig, terminal: ExecutionSink) -> None:
         self.config = config
         self.terminal = terminal
 
@@ -36,7 +36,7 @@ class SessionRunner:
 
     def _prepare_execution(self, request: RunRequest):
         self.terminal.step("Workspace", "Creating or reusing the isolated repository workspace.")
-        workspace = prepare_workspace(request, self.config.github_token)
+        workspace = prepare_workspace(request, self.config.github_token, self.config)
         source_label = "local project copy" if workspace.source_kind == "local" else "git checkout"
         self.terminal.step("Workspace", f"Workspace ready at `{workspace.root}` using the prepared {source_label}.")
 

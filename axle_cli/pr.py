@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError:  # pragma: no cover
+    class _MissingRequests:
+        def post(self, *_args, **_kwargs):
+            raise RuntimeError("The `requests` package is required for GitHub PR creation.")
+
+    requests = _MissingRequests()
 
 from .repo import RepoError, extract_github_repo
 

@@ -6,14 +6,14 @@ from pathlib import Path
 
 from .config import settings
 from .models import TestResult
-from .terminal import Terminal
+from .terminal import ExecutionSink
 
 
 def run_test_command(
     repo_dir: Path,
     command: str,
     log_path: Path,
-    terminal: Terminal,
+    terminal: ExecutionSink,
     *,
     env: dict[str, str] | None = None,
 ) -> TestResult:
