@@ -177,6 +177,30 @@ class SetupFeatureTests(unittest.TestCase):
         self.assertIsNone(config.llm_api_key)
         self.assertIn("Goose provider settings saved", output)
 
+    def test_auth_llm_allows_docker_model_runner_without_api_key(self):
+        self._temp_runtime()
+        _, state, _, _, main = self._load_runtime_modules()
+
+        stdout = io.StringIO()
+        args = argparse.Namespace(
+            api_key=None,
+            provider="docker-model-runner",
+            model="hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:q4_k_m",
+            fallback_model=None,
+            base_url="http://localhost:12434",
+            base_path="/engines/llama.cpp/v1/chat/completions",
+        )
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main.handle_auth_llm(args, main.Terminal(verbose=False))
+
+        config = state.load_config()
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(config.llm_provider, "docker-model-runner")
+        self.assertEqual(config.llm_model, "hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:q4_k_m")
+        self.assertEqual(config.llm_base_url, "http://localhost:12434")
+        self.assertEqual(config.llm_base_path, "/engines/llama.cpp/v1/chat/completions")
+        self.assertIsNone(config.llm_api_key)
+
     def test_status_and_doctor_accept_ollama_without_api_key(self):
         self._temp_runtime()
         _, state, _, _, main = self._load_runtime_modules()
@@ -1028,6 +1052,26 @@ class SetupFeatureTests(unittest.TestCase):
             ],
         )
 
+    def test_goose_runner_maps_docker_model_runner_provider_to_openai_cli(self):
+        goose_runner = importlib.import_module("axle_cli.goose_runner")
+        importlib.reload(goose_runner)
+        config = SavedConfig(
+            goose_binary="goose",
+            goose_builtin="developer",
+            llm_provider="docker-model-runner",
+            llm_model="huggingface.co/qwen/qwen2.5-coder-3b-instruct-gguf",
+        )
+
+        with mock.patch.object(goose_runner.shutil, "which", return_value="/usr/local/bin/goose"):
+            command = goose_runner.build_command(
+                config,
+                "inspect the repo",
+                provider="docker-model-runner",
+            )
+
+        provider_index = command.index("--provider")
+        self.assertEqual(command[provider_index + 1], "openai")
+
     def test_goose_runner_uses_smoke_recipe_for_smoke_purpose(self):
         goose_runner = importlib.import_module("axle_cli.goose_runner")
         importlib.reload(goose_runner)
@@ -1049,6 +1093,41 @@ class SetupFeatureTests(unittest.TestCase):
         self.assertIn("--recipe", command)
         recipe_path = command[command.index("--recipe") + 1]
         self.assertEqual(recipe_path, str(Path(goose_runner.__file__).resolve().parent / "recipes" / "axle_smoke.yaml"))
+
+    def test_goose_runner_sets_openai_host_and_base_path_for_docker_model_runner(self):
+        goose_runner = importlib.import_module("axle_cli.goose_runner")
+        importlib.reload(goose_runner)
+        from axle_cli.models import Workspace
+
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root = Path(tempdir.name)
+        repo_dir = root / "repo"
+        repo_dir.mkdir()
+        workspace = Workspace(
+            run_id="run-dmr",
+            workspace_key="workspace-key",
+            root=root,
+            repo_dir=repo_dir,
+            transcript_path=root / "goose-transcript.log",
+            prompt_path=root / "goose-prompt.md",
+            diff_path=root / "changes.patch",
+            test_log_path=root / "test.log",
+        )
+        config = SavedConfig(
+            goose_binary="goose",
+            goose_builtin="developer",
+            llm_provider="docker-model-runner",
+            llm_model="hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:q4_k_m",
+            llm_base_url="http://localhost:12434",
+            llm_base_path="/engines/llama.cpp/v1/chat/completions",
+        )
+
+        env = goose_runner._goose_env(config, workspace, provider="docker-model-runner")
+
+        self.assertEqual(env["OPENAI_HOST"], "http://localhost:12434")
+        self.assertEqual(env["OPENAI_BASE_PATH"], "/engines/llama.cpp/v1/chat/completions")
+        self.assertNotIn("OPENAI_BASE_URL", env)
 
     def test_goose_runner_prefers_explicit_recipe_override_over_configured_recipe(self):
         goose_runner = importlib.import_module("axle_cli.goose_runner")
@@ -1783,6 +1862,61 @@ class SetupFeatureTests(unittest.TestCase):
             filtered = repo_module.source_changed_files(repo_dir)
 
         self.assertEqual(filtered, ["todos/views.py"])
+
+    def test_commit_and_push_stages_only_source_files(self):
+        repo_module = importlib.import_module("axle_cli.repo")
+        importlib.reload(repo_module)
+
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        repo_dir = Path(tempdir.name)
+
+        commands: list[list[str]] = []
+
+        def fake_run_git(command, _repo_dir):
+            commands.append(command)
+            if command[:3] == ["diff", "--cached", "--name-only"]:
+                return CompletedProcess(command, 0, stdout="todos/templates/todos/index.html\n", stderr="")
+            return CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch.object(repo_module, "source_changed_files", return_value=["todos/templates/todos/index.html"]), mock.patch.object(
+            repo_module, "run_git", side_effect=fake_run_git
+        ), mock.patch.object(repo_module, "looks_like_remote", return_value=True):
+            staged = repo_module.commit_and_push(
+                repo_dir,
+                "axle/demo-branch",
+                "demo commit",
+                "gh-token",
+                "https://github.com/acme/widgets",
+                "Axle CLI",
+                "axle@example.com",
+            )
+
+        self.assertEqual(staged, ["todos/templates/todos/index.html"])
+        self.assertIn(["add", "--", "todos/templates/todos/index.html"], commands)
+        self.assertNotIn(["add", "-A"], commands)
+
+    def test_build_pr_body_includes_issue_context_and_changed_files(self):
+        pr_module = importlib.import_module("axle_cli.pr")
+        importlib.reload(pr_module)
+
+        body = pr_module.build_pr_body(
+            "Update Todo List to My Tasks in todos/templates/todos/index.html only.",
+            issue_key="KAN-9703",
+            issue_url="https://jira.example.com/browse/KAN-9703",
+            issue_labels=["axle-run", "demo"],
+            changed_files=["todos/templates/todos/index.html"],
+            test_command="python manage.py test",
+            provider="openai",
+            model="gpt-5-mini",
+        )
+
+        self.assertIn("## Summary", body)
+        self.assertIn("[KAN-9703](https://jira.example.com/browse/KAN-9703)", body)
+        self.assertIn("Labels: axle-run, demo", body)
+        self.assertIn("`todos/templates/todos/index.html`", body)
+        self.assertIn("Validation: `python manage.py test`", body)
+        self.assertIn("Model: openai / gpt-5-mini", body)
 
     def test_repo_tree_omits_managed_workspace_artifacts(self):
         repo_module = importlib.import_module("axle_cli.repo")

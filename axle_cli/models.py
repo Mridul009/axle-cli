@@ -87,6 +87,7 @@ class SavedConfig:
     llm_api_key: str | None = None
     llm_provider: str = "openai"
     llm_base_url: str | None = None
+    llm_base_path: str | None = None
     llm_model: str = "gpt-5-mini"
     llm_fallback_model: str | None = None
     goose_binary: str = "goose"
@@ -300,6 +301,7 @@ class AutomationRun:
     repository: str
     base_branch: str
     task: str
+    issue_labels: list[str] = field(default_factory=list)
     callback_url: str | None = None
     test_command: str | None = None
     provider: str | None = None
@@ -335,6 +337,7 @@ class AutomationRun:
             "run_id": self.run_id,
             "issue_key": self.issue_key,
             "issue_url": self.issue_url,
+            "issue_labels": self.issue_labels,
             "repository": self.repository,
             "base_branch": self.base_branch,
             "task": self.task,
@@ -375,6 +378,7 @@ class AutomationRun:
             run_id=payload["run_id"],
             issue_key=payload["issue_key"],
             issue_url=payload["issue_url"],
+            issue_labels=list(payload.get("issue_labels") or []),
             repository=payload["repository"],
             base_branch=payload["base_branch"],
             task=payload["task"],

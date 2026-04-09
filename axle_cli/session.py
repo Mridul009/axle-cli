@@ -317,5 +317,12 @@ class SessionRunner:
             f"Axle CLI output: {summary.run_id[:8]}",
             request.task_context or request.task,
             self.config.github_token,
+            issue_key=request.issue_key,
+            issue_url=request.issue_url,
+            issue_labels=list(getattr(request, "issue_labels", []) or []),
+            changed_files=summary.changed_files,
+            test_command=request.test_command,
+            provider=request.provider,
+            model=request.model,
         )
         return summary

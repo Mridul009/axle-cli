@@ -170,6 +170,16 @@ def _issue_project_key(issue: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _issue_labels(issue: Mapping[str, Any]) -> list[str]:
+    fields = issue.get("fields")
+    if not isinstance(fields, Mapping):
+        return []
+    labels = fields.get("labels")
+    if not isinstance(labels, list):
+        return []
+    return [str(item).strip() for item in labels if str(item).strip()]
+
+
 def _issue_labels(issue: Mapping[str, Any]) -> set[str]:
     labels = issue.get("labels") or []
     return {
@@ -387,6 +397,7 @@ def route_issue_to_run(
         repository=merged.repository or config.repository or "",
         base_branch=merged.base_branch or config.base_branch or "main",
         task=_issue_task(issue, issue_key),
+        issue_labels=_issue_labels(issue),
         callback_url=_clean_text(issue.get("callback_url")),
         test_command=merged.test_command,
         provider=merged.provider,

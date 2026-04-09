@@ -421,10 +421,13 @@ def commit_and_push(
         raise RepoError("GitHub token is required for push.")
     if not looks_like_remote(repository):
         raise RepoError("Push is only supported for remote repositories.")
+    staged_candidates = source_changed_files(repo_dir)
+    if not staged_candidates:
+        raise RepoError("No repository changes were produced.")
     run_git(["config", "user.name", git_author_name], repo_dir)
     run_git(["config", "user.email", git_author_email], repo_dir)
     run_git(["checkout", "-b", branch_name], repo_dir)
-    run_git(["add", "-A"], repo_dir)
+    run_git(["add", "--", *staged_candidates], repo_dir)
     staged = [line.strip() for line in run_git(["diff", "--cached", "--name-only"], repo_dir).stdout.splitlines() if line.strip()]
     if not staged:
         raise RepoError("No repository changes were produced.")
