@@ -123,6 +123,9 @@ class RunRequest:
     repository: str
     base_branch: str
     task_context: str | None = None
+    issue_key: str | None = None
+    issue_url: str | None = None
+    issue_labels: list[str] = field(default_factory=list)
     repository_path: str | None = None
     repository_kind: Literal["auto", "remote", "local"] = "auto"
     setup_mode: Literal["auto", "skip"] = "auto"
@@ -417,6 +420,9 @@ class AutomationRun:
         return RunRequest(
             task=self.task,
             task_context=self.task,
+            issue_key=self.issue_key,
+            issue_url=self.issue_url,
+            issue_labels=list(self.issue_labels),
             repository=self.repository,
             base_branch=self.base_branch,
             repository_path=self.repository_path,
