@@ -146,6 +146,36 @@ Override them with:
 - `AXLE_DEMO_COORDINATOR_URL`
 - `AXLE_DEMO_RUN_STORE`
 
+For the Docker + Jira demo flow, use the wrapper in [`ops/axle-demo-docker.sh`](/Users/mshukl/Documents/DataAxle/code/cli_agent/ops/axle-demo-docker.sh):
+
+```bash
+chmod +x ops/axle-demo-docker.sh
+alias axle-demo='./ops/axle-demo-docker.sh'
+```
+
+Then you only need these commands:
+
+```bash
+axle-demo logs
+axle-demo watch <run_id>
+axle-demo show <run_id>
+```
+
+Default assumptions:
+
+- coordinator container: `axle-coordinator`
+- worker container: `axle-worker`
+- base URL: `http://127.0.0.1`
+- admin token: `change-me-admin`
+
+Override them with:
+
+- `AXLE_DEMO_COORDINATOR_CONTAINER`
+- `AXLE_DEMO_WORKER_CONTAINER`
+- `AXLE_DEMO_BASE_URL`
+- `AXLE_DEMO_ADMIN_TOKEN`
+- `AXLE_DEMO_POLL_SECONDS`
+
 Recover stale runs or clear orphaned workers:
 
 ```bash
