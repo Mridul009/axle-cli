@@ -11,6 +11,7 @@ DEFAULT_ISSUE_KEY="${AXLE_DEMO_ISSUE_KEY:-KAN-9803}"
 DEFAULT_PROJECT_KEY="${AXLE_DEMO_PROJECT_KEY:-KAN}"
 DEFAULT_LABEL="${AXLE_DEMO_LABEL:-axle-run}"
 RUNS_DIR="${AXLE_DEMO_RUNS_DIR:-${CLI_HOME}/coordinator/runs}"
+LOG_TAIL="${AXLE_DEMO_LOG_TAIL:-200}"
 
 usage() {
   cat <<'EOF'
@@ -43,6 +44,7 @@ Environment overrides:
   AXLE_DEMO_BASE_URL                default: http://127.0.0.1
   AXLE_DEMO_ADMIN_TOKEN             default: change-me-admin
   AXLE_DEMO_POLL_SECONDS            default: 2
+  AXLE_DEMO_LOG_TAIL                default: 200
   AXLE_DEMO_CLI_HOME                default: /data/.axle-cli
   AXLE_DEMO_RUNS_DIR                default: /data/.axle-cli/coordinator/runs
   AXLE_DEMO_ISSUE_KEY               default: KAN-9803
@@ -305,17 +307,17 @@ PY
 combined_logs() {
   trap 'kill 0' INT TERM EXIT
 
-  docker logs "$COORDINATOR_CONTAINER" --since 30s -f 2>&1 | sed 's/^/[coordinator] /' &
-  docker logs "$WORKER_CONTAINER" --since 30s -f 2>&1 | sed 's/^/[worker] /' &
+  docker logs "$COORDINATOR_CONTAINER" --tail "$LOG_TAIL" -f 2>&1 | sed 's/^/[coordinator] /' &
+  docker logs "$WORKER_CONTAINER" --tail "$LOG_TAIL" -f 2>&1 | sed 's/^/[worker] /' &
   wait
 }
 
 coordinator_logs() {
-  docker logs "$COORDINATOR_CONTAINER" --since 30s -f
+  docker logs "$COORDINATOR_CONTAINER" --tail "$LOG_TAIL" -f
 }
 
 worker_logs() {
-  docker logs "$WORKER_CONTAINER" --since 30s -f
+  docker logs "$WORKER_CONTAINER" --tail "$LOG_TAIL" -f
 }
 
 show_config() {
@@ -325,6 +327,7 @@ worker_container: ${WORKER_CONTAINER}
 base_url: ${BASE_URL}
 admin_token: ${ADMIN_TOKEN}
 poll_seconds: ${POLL_SECONDS}
+log_tail: ${LOG_TAIL}
 cli_home: ${CLI_HOME}
 runs_dir: ${RUNS_DIR}
 issue_key: ${DEFAULT_ISSUE_KEY}
