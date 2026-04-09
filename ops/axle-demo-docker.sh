@@ -82,10 +82,10 @@ watch_run() {
     printf '%s\n' "$json" | print_run_summary
 
     local status
-    status="$(printf '%s' "$json" | python3 - <<'PY'
+    status="$(AXLE_DEMO_PAYLOAD="$json" python3 - <<'PY'
 import json
-import sys
-print(json.load(sys.stdin).get("status", ""))
+import os
+print(json.loads(os.environ["AXLE_DEMO_PAYLOAD"]).get("status", ""))
 PY
 )"
 
