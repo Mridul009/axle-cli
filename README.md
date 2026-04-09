@@ -153,13 +153,54 @@ chmod +x ops/axle-demo-docker.sh
 alias axle-demo='./ops/axle-demo-docker.sh'
 ```
 
-Then you only need these commands:
+Demo wrapper commands:
 
 ```bash
 axle-demo logs
+axle-demo coordinator-logs
+axle-demo worker-logs
 axle-demo watch <run_id>
 axle-demo show <run_id>
+axle-demo latest
+axle-demo latest-show
+axle-demo latest-watch
+axle-demo ps
+axle-demo health
+axle-demo config
+axle-demo last-pr
+axle-demo restart
+axle-demo jira-trigger <payload.json>
+axle-demo jira-smoke
+axle-demo jira-multifile
 ```
+
+Use `logs` for live coordinator and worker output. Use `watch <run_id>` for a live run view until completion. Use `show <run_id>` for a one-shot summary.
+
+`latest`, `latest-show`, and `latest-watch` are the fastest demo helpers when Jira has already triggered a run and you do not yet know the run id.
+
+`jira-smoke` and `jira-multifile` are the built-in trigger helpers for the common demo payloads. `jira-trigger <payload.json>` lets you POST a custom Jira webhook body.
+
+Live commands:
+
+- `logs`
+- `coordinator-logs`
+- `worker-logs`
+- `watch <run_id>`
+- `latest-watch`
+
+One-shot commands:
+
+- `show <run_id>`
+- `latest`
+- `latest-show`
+- `ps`
+- `health`
+- `config`
+- `last-pr`
+- `restart`
+- `jira-trigger <payload.json>`
+- `jira-smoke`
+- `jira-multifile`
 
 Default assumptions:
 
@@ -175,6 +216,11 @@ Override them with:
 - `AXLE_DEMO_BASE_URL`
 - `AXLE_DEMO_ADMIN_TOKEN`
 - `AXLE_DEMO_POLL_SECONDS`
+- `AXLE_DEMO_CLI_HOME`
+- `AXLE_DEMO_RUNS_DIR`
+- `AXLE_DEMO_ISSUE_KEY`
+- `AXLE_DEMO_PROJECT_KEY`
+- `AXLE_DEMO_LABEL`
 
 Recover stale runs or clear orphaned workers:
 
