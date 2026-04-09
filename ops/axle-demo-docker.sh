@@ -42,11 +42,15 @@ fetch_run_json() {
 }
 
 print_run_summary() {
-  python3 - "$@" <<'PY'
+  local payload
+  payload="$(cat)"
+
+  AXLE_DEMO_PAYLOAD="$payload" python3 - <<'PY'
 import json
+import os
 import sys
 
-payload = json.load(sys.stdin)
+payload = json.loads(os.environ["AXLE_DEMO_PAYLOAD"])
 events = payload.get("events") or []
 last_event = events[-1] if events else {}
 changed_files = payload.get("changed_files") or []
@@ -115,7 +119,8 @@ main() {
       ;;
     show)
       require_arg "$@"
-      fetch_run_json "$2" | print_run_summary
+      json="$(fetch_run_json "$2")"
+      printf '%s\n' "$json" | print_run_summary
       ;;
     ""|-h|--help|help)
       usage
