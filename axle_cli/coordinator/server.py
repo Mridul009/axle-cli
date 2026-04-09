@@ -144,18 +144,39 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
     server: CoordinatorHttpServer
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/healthz":
+        parsed = urlparse(self.path)
+        if parsed.path == "/healthz":
             _json_response(self, HTTPStatus.OK, {"ok": True})
             return
-        if self.path == "/api/workers":
+        if parsed.path == "/api/workers":
             if not self._require_admin():
                 return
             _json_response(self, HTTPStatus.OK, {"workers": self.server.service.list_workers()})
             return
-        if self.path.startswith("/api/runs/"):
+        if parsed.path.startswith("/api/issues/") and parsed.path.endswith("/runs/latest"):
             if not self._require_admin():
                 return
-            run_id = self.path.rsplit("/", 1)[-1]
+            issue_key = parsed.path.split("/")[3]
+            run = self.server.service.latest_run_for_issue(issue_key)
+            if run is None:
+                _json_response(self, HTTPStatus.NOT_FOUND, {"error": "issue_run_not_found", "issue_key": issue_key.upper()})
+                return
+            _json_response(self, HTTPStatus.OK, run.to_json())
+            return
+        if parsed.path.startswith("/api/issues/") and parsed.path.endswith("/status"):
+            if not self._require_admin():
+                return
+            issue_key = parsed.path.split("/")[3]
+            status = self.server.service.issue_status(issue_key)
+            if status is None:
+                _json_response(self, HTTPStatus.NOT_FOUND, {"error": "issue_run_not_found", "issue_key": issue_key.upper()})
+                return
+            _json_response(self, HTTPStatus.OK, status)
+            return
+        if parsed.path.startswith("/api/runs/"):
+            if not self._require_admin():
+                return
+            run_id = parsed.path.rsplit("/", 1)[-1]
             try:
                 run = self.server.store.get_run(run_id)
             except FileNotFoundError:

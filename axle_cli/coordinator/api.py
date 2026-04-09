@@ -40,6 +40,28 @@ class CoordinatorService:
         default_artifact_root = Path(store_root) / "artifacts" if store_root else None
         self.artifact_store = artifact_store or build_artifact_store(root=default_artifact_root)
 
+    def latest_run_for_issue(self, issue_key: str) -> AutomationRun | None:
+        if not hasattr(self.store, "latest_run_for_issue"):
+            return None
+        return self.store.latest_run_for_issue(issue_key)  # type: ignore[attr-defined]
+
+    def issue_status(self, issue_key: str) -> dict[str, Any] | None:
+        run = self.latest_run_for_issue(issue_key)
+        if run is None:
+            return None
+        last_event = run.events[-1] if run.events else None
+        return {
+            "issue_key": run.issue_key,
+            "run_id": run.run_id,
+            "status": run.status,
+            "result": run.result,
+            "last_stage": last_event.stage if last_event else None,
+            "last_event": last_event.message if last_event else None,
+            "pr_url": run.pr_url,
+            "changed_files": run.changed_files,
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        }
+
     def create_run_from_issue_key(self, issue_key: str, *, launch_worker: bool = False, coordinator_url: str | None = None, run_id: str | None = None) -> AutomationRun:
         issue = fetch_jira_issue(self.config, issue_key)
         return self.create_run_from_issue(issue, launch_worker=launch_worker, coordinator_url=coordinator_url, run_id=run_id, event_stage="Jira")

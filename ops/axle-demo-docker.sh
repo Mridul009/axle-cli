@@ -25,6 +25,10 @@ Usage:
   axle-demo-docker.sh latest
   axle-demo-docker.sh latest-show
   axle-demo-docker.sh latest-watch
+  axle-demo-docker.sh latest-issue <issue_key>
+  axle-demo-docker.sh show-issue <issue_key>
+  axle-demo-docker.sh watch-issue <issue_key>
+  axle-demo-docker.sh pr-issue <issue_key>
   axle-demo-docker.sh last-pr
   axle-demo-docker.sh run <run_id>
   axle-demo-docker.sh watch <run_id>
@@ -49,6 +53,7 @@ Examples:
   ./ops/axle-demo-docker.sh logs
   ./ops/axle-demo-docker.sh watch 38b12550-f6c1-5c2f-9c92-a18bb047176e
   ./ops/axle-demo-docker.sh latest-watch
+  ./ops/axle-demo-docker.sh watch-issue KAN-9803
   ./ops/axle-demo-docker.sh jira-multifile
 EOF
 }
@@ -63,6 +68,18 @@ require_arg() {
 fetch_run_json() {
   local run_id="$1"
   curl -fsS "${BASE_URL}/api/runs/${run_id}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}"
+}
+
+fetch_issue_latest_run_json() {
+  local issue_key="$1"
+  curl -fsS "${BASE_URL}/api/issues/${issue_key}/runs/latest" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}"
+}
+
+fetch_issue_status_json() {
+  local issue_key="$1"
+  curl -fsS "${BASE_URL}/api/issues/${issue_key}/status" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}"
 }
 
@@ -97,6 +114,18 @@ for path in reversed(paths):
         print(payload['run_id'])
         break
 PY"
+}
+
+issue_latest_run_id() {
+  local issue_key="$1"
+  local json
+  json="$(fetch_issue_latest_run_json "$issue_key")"
+  AXLE_DEMO_PAYLOAD="$json" python3 - <<'PY'
+import json
+import os
+payload = json.loads(os.environ["AXLE_DEMO_PAYLOAD"])
+print(payload["run_id"])
+PY
 }
 
 build_demo_payload() {
@@ -167,6 +196,32 @@ if payload.get("pr_url"):
 PY
 }
 
+print_issue_status_summary() {
+  local payload
+  payload="$(cat)"
+
+  AXLE_DEMO_PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["AXLE_DEMO_PAYLOAD"])
+changed_files = payload.get("changed_files") or []
+
+print(f"issue_key: {payload.get('issue_key', '')}")
+print(f"run_id: {payload.get('run_id', '')}")
+print(f"status: {payload.get('status', '')}")
+print(f"result: {payload.get('result', '')}")
+print(f"last_stage: {payload.get('last_stage') or '-'}")
+print(f"last_event: {payload.get('last_event') or '-'}")
+if changed_files:
+    print("changed_files:")
+    for path in changed_files:
+        print(f"  - {path}")
+if payload.get("pr_url"):
+    print(f"pr_url: {payload['pr_url']}")
+PY
+}
+
 watch_run() {
   local run_id="$1"
 
@@ -175,6 +230,32 @@ watch_run() {
     json="$(fetch_run_json "$run_id")"
     clear
     printf '%s\n' "$json" | print_run_summary
+
+    local status
+    status="$(AXLE_DEMO_PAYLOAD="$json" python3 - <<'PY'
+import json
+import os
+print(json.loads(os.environ["AXLE_DEMO_PAYLOAD"]).get("status", ""))
+PY
+)"
+
+    if [[ "$status" == "completed" || "$status" == "failed" ]]; then
+      printf '\nfinal_status: %s\n' "$status"
+      break
+    fi
+
+    sleep "$POLL_SECONDS"
+  done
+}
+
+watch_issue() {
+  local issue_key="$1"
+
+  while true; do
+    local json
+    json="$(fetch_issue_status_json "$issue_key")"
+    clear
+    printf '%s\n' "$json" | print_issue_status_summary
 
     local status
     status="$(AXLE_DEMO_PAYLOAD="$json" python3 - <<'PY'
@@ -264,6 +345,29 @@ main() {
     latest-watch)
       run_id="$(latest_run_id)"
       watch_run "$run_id"
+      ;;
+    latest-issue)
+      require_arg "$@"
+      issue_latest_run_id "$2"
+      ;;
+    show-issue)
+      require_arg "$@"
+      json="$(fetch_issue_status_json "$2")"
+      printf '%s\n' "$json" | print_issue_status_summary
+      ;;
+    watch-issue)
+      require_arg "$@"
+      watch_issue "$2"
+      ;;
+    pr-issue)
+      require_arg "$@"
+      json="$(fetch_issue_status_json "$2")"
+      AXLE_DEMO_PAYLOAD="$json" python3 - <<'PY'
+import json
+import os
+payload = json.loads(os.environ["AXLE_DEMO_PAYLOAD"])
+print(payload.get("pr_url", ""))
+PY
       ;;
     last-pr)
       run_id="$(latest_run_with_pr)"

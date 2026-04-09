@@ -72,6 +72,16 @@ class _FileRunStoreBackend:
     def list_runs(self) -> list[AutomationRun]:
         return [self.get_run(path.stem) for path in sorted(self.runs_dir.glob("*.json"))]
 
+    def latest_run_for_issue(self, issue_key: str) -> AutomationRun | None:
+        normalized = issue_key.strip().upper()
+        if not normalized:
+            return None
+        matches = [run for run in self.list_runs() if run.issue_key.strip().upper() == normalized]
+        if not matches:
+            return None
+        matches.sort(key=lambda run: (run.created_at, run.updated_at or run.created_at, run.run_id), reverse=True)
+        return matches[0]
+
     def append_event(self, run_id: str, event: RunEvent) -> AutomationRun:
         run = self.get_run(run_id)
         run.events.append(event)
@@ -220,6 +230,20 @@ class _SqliteRunStoreBackend:
         with self._connect() as connection:
             rows = connection.execute("SELECT payload_json FROM runs ORDER BY created_at DESC").fetchall()
         return [AutomationRun.from_json(json.loads(row["payload_json"])) for row in rows]
+
+    def latest_run_for_issue(self, issue_key: str) -> AutomationRun | None:
+        normalized = issue_key.strip().upper()
+        if not normalized:
+            return None
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM runs ORDER BY created_at DESC"
+            ).fetchall()
+        for row in rows:
+            run = AutomationRun.from_json(json.loads(row["payload_json"]))
+            if run.issue_key.strip().upper() == normalized:
+                return run
+        return None
 
     def append_event(self, run_id: str, event: RunEvent) -> AutomationRun:
         run = self.get_run(run_id)

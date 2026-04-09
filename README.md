@@ -180,6 +180,17 @@ Use `logs` for live coordinator and worker output. Use `watch <run_id>` for a li
 
 `jira-smoke` and `jira-multifile` are the built-in trigger helpers for the common demo payloads. `jira-trigger <payload.json>` lets you POST a custom Jira webhook body.
 
+Issue-centric demo commands:
+
+```bash
+axle-demo latest-issue <issue_key>
+axle-demo show-issue <issue_key>
+axle-demo watch-issue <issue_key>
+axle-demo pr-issue <issue_key>
+```
+
+Use these when the operator is working from Jira, not from an Axle run id. They are easier to demo because the ticket key is already visible in Jira, so you can jump straight from "edit ticket" to "watch current status" and "print PR link" without first discovering the run id.
+
 Live commands:
 
 - `logs`
@@ -187,12 +198,16 @@ Live commands:
 - `worker-logs`
 - `watch <run_id>`
 - `latest-watch`
+- `watch-issue <issue_key>`
 
 One-shot commands:
 
 - `show <run_id>`
 - `latest`
 - `latest-show`
+- `latest-issue <issue_key>`
+- `show-issue <issue_key>`
+- `pr-issue <issue_key>`
 - `ps`
 - `health`
 - `config`
