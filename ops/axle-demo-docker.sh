@@ -27,6 +27,7 @@ Usage:
   axle-demo-docker.sh latest-show
   axle-demo-docker.sh latest-watch
   axle-demo-docker.sh latest-issue <issue_key>
+  axle-demo-docker.sh webhook-status <issue_key>
   axle-demo-docker.sh show-issue <issue_key>
   axle-demo-docker.sh watch-issue <issue_key>
   axle-demo-docker.sh pr-issue <issue_key>
@@ -56,6 +57,7 @@ Examples:
   ./ops/axle-demo-docker.sh watch 38b12550-f6c1-5c2f-9c92-a18bb047176e
   ./ops/axle-demo-docker.sh latest-watch
   ./ops/axle-demo-docker.sh watch-issue KAN-9803
+  ./ops/axle-demo-docker.sh webhook-status KAN-9803
   ./ops/axle-demo-docker.sh jira-multifile
 EOF
 }
@@ -336,6 +338,45 @@ label: ${DEFAULT_LABEL}
 EOF
 }
 
+webhook_status() {
+  local issue_key="$1"
+  local recent_logs
+
+  printf 'issue_key: %s\n' "$issue_key"
+
+  if health_check >/dev/null 2>&1; then
+    printf 'coordinator_health: ok\n'
+  else
+    printf 'coordinator_health: error\n'
+  fi
+
+  try_fetch_issue_status_json "$issue_key"
+  if [[ "$ISSUE_STATUS_HTTP_CODE" == "200" ]]; then
+    printf 'webhook_status: received\n'
+    printf '%s\n' "$ISSUE_STATUS_BODY" | print_issue_status_summary
+  elif [[ "$ISSUE_STATUS_HTTP_CODE" == "404" ]]; then
+    printf 'webhook_status: no_run_found\n'
+    printf 'status: waiting\n'
+    printf 'last_event: no webhook-created run exists for this issue yet\n'
+  else
+    printf 'webhook_status: error\n'
+    printf 'status_code: %s\n' "$ISSUE_STATUS_HTTP_CODE"
+    if [[ -n "$ISSUE_STATUS_BODY" ]]; then
+      printf 'response: %s\n' "$ISSUE_STATUS_BODY"
+    fi
+  fi
+
+  recent_logs="$(docker logs "$COORDINATOR_CONTAINER" --tail "$LOG_TAIL" 2>&1 | grep -F "[webhook]" | grep -F "$issue_key" || true)"
+  if [[ -n "$recent_logs" ]]; then
+    printf 'recent_webhook_logs:\n'
+    while IFS= read -r line; do
+      printf '  %s\n' "$line"
+    done <<< "$recent_logs"
+  else
+    printf 'recent_webhook_logs: none\n'
+  fi
+}
+
 main() {
   local cmd="${1:-}"
   local json
@@ -380,6 +421,10 @@ main() {
     latest-issue)
       require_arg "$@"
       issue_latest_run_id "$2"
+      ;;
+    webhook-status)
+      require_arg "$@"
+      webhook_status "$2"
       ;;
     show-issue)
       require_arg "$@"
