@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import os
 import threading
 import time
@@ -77,6 +78,10 @@ def _event_details(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             details[key] = str(value)
     return details
+
+
+def _server_log(message: str) -> None:
+    print(message, file=sys.stdout, flush=True)
 
 
 class CoordinatorHttpServer(ThreadingHTTPServer):
@@ -193,6 +198,15 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/webhooks/runs":
                 if not self._require_admin():
                     return
+                issue_key = ""
+                if isinstance(body.get("issue"), dict):
+                    issue_key = str(body["issue"].get("key") or "").strip().upper()
+                if not issue_key:
+                    issue_key = str(body.get("issue_key") or body.get("issueKey") or "").strip().upper()
+                event_type = str(body.get("webhookEvent") or body.get("webhook_event") or body.get("event_type") or "unknown").strip()
+                _server_log(
+                    f"[webhook] received path={parsed.path} event={event_type or 'unknown'} issue={issue_key or '-'}"
+                )
                 provided_secret = _webhook_secret(self)
                 provided_signature = _webhook_signature(self)
                 webhook_timestamp = _webhook_timestamp(self)
@@ -222,6 +236,12 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
                         webhook_secret=self.server.webhook_secret,
                     )
                 payload = run.to_json() if hasattr(run, "to_json") else dict(run)
+                _server_log(
+                    "[webhook] run created "
+                    f"issue={payload.get('issue_key') or issue_key or '-'} "
+                    f"run_id={payload.get('run_id') or '-'} "
+                    f"status={payload.get('status') or '-'}"
+                )
                 _json_response(self, HTTPStatus.CREATED, payload)
                 return
             if parsed.path == "/api/workers/register":
@@ -298,9 +318,11 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
                 _json_response(self, HTTPStatus.OK, {"run_id": run_id, "artifacts": artifacts})
                 return
         except ValueError as exc:
+            _server_log(f"[webhook] bad request path={parsed.path} error={exc}")
             _json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
         except Exception as exc:
+            _server_log(f"[webhook] internal error path={parsed.path} error={exc}")
             _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal_error", "message": str(exc)})
             return
         _json_response(self, HTTPStatus.NOT_FOUND, {"error": "not_found"})
