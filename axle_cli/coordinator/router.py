@@ -180,7 +180,7 @@ def _issue_labels(issue: Mapping[str, Any]) -> list[str]:
     return [str(item).strip() for item in labels if str(item).strip()]
 
 
-def _issue_labels(issue: Mapping[str, Any]) -> set[str]:
+def _issue_label_set(issue: Mapping[str, Any]) -> set[str]:
     labels = issue.get("labels") or []
     return {
         _clean_text(label).lower()
@@ -206,7 +206,7 @@ def _issue_components(issue: Mapping[str, Any]) -> set[str]:
 def _match_rule(issue: Mapping[str, Any], rule: RoutingRule) -> bool:
     match = rule.match or {}
     project_key = _issue_project_key(issue)
-    labels = _issue_labels(issue)
+    labels = _issue_label_set(issue)
     components = _issue_components(issue)
 
     expected_project = _clean_text(match.get("project") or match.get("project_key"))
