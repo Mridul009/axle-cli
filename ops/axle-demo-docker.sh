@@ -83,6 +83,15 @@ fetch_issue_status_json() {
     -H "Authorization: Bearer ${ADMIN_TOKEN}"
 }
 
+try_fetch_issue_status_json() {
+  local issue_key="$1"
+  local response
+  response="$(curl -sS -w $'\n%{http_code}' "${BASE_URL}/api/issues/${issue_key}/status" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}")"
+  ISSUE_STATUS_HTTP_CODE="${response##*$'\n'}"
+  ISSUE_STATUS_BODY="${response%$'\n'*}"
+}
+
 docker_exec_coordinator() {
   docker exec "$COORDINATOR_CONTAINER" sh -lc "$1"
 }
@@ -252,9 +261,28 @@ watch_issue() {
   local issue_key="$1"
 
   while true; do
-    local json
-    json="$(fetch_issue_status_json "$issue_key")"
+    try_fetch_issue_status_json "$issue_key"
     clear
+    if [[ "$ISSUE_STATUS_HTTP_CODE" == "404" ]]; then
+      printf 'issue_key: %s\n' "$issue_key"
+      printf 'status: waiting\n'
+      printf 'last_event: waiting for first run to be created\n'
+      sleep "$POLL_SECONDS"
+      continue
+    fi
+
+    if [[ "$ISSUE_STATUS_HTTP_CODE" != "200" ]]; then
+      printf 'issue_key: %s\n' "$issue_key"
+      printf 'status: error\n'
+      printf 'last_event: unexpected HTTP status %s\n' "$ISSUE_STATUS_HTTP_CODE"
+      if [[ -n "$ISSUE_STATUS_BODY" ]]; then
+        printf '\n%s\n' "$ISSUE_STATUS_BODY"
+      fi
+      return 1
+    fi
+
+    local json
+    json="$ISSUE_STATUS_BODY"
     printf '%s\n' "$json" | print_issue_status_summary
 
     local status
@@ -352,7 +380,18 @@ main() {
       ;;
     show-issue)
       require_arg "$@"
-      json="$(fetch_issue_status_json "$2")"
+      try_fetch_issue_status_json "$2"
+      if [[ "$ISSUE_STATUS_HTTP_CODE" == "404" ]]; then
+        printf 'issue_key: %s\n' "$2"
+        printf 'status: not_found\n'
+        printf 'last_event: no Axle run exists for this issue yet\n'
+        exit 0
+      fi
+      if [[ "$ISSUE_STATUS_HTTP_CODE" != "200" ]]; then
+        printf '%s\n' "$ISSUE_STATUS_BODY"
+        exit 1
+      fi
+      json="$ISSUE_STATUS_BODY"
       printf '%s\n' "$json" | print_issue_status_summary
       ;;
     watch-issue)
