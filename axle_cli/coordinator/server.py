@@ -167,8 +167,8 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        body = _read_json_body(self)
         try:
+            body = _read_json_body(self)
             if parsed.path == "/api/webhooks/runs":
                 if not self._require_admin():
                     return
