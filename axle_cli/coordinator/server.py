@@ -178,6 +178,16 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
                 return
             _json_response(self, HTTPStatus.OK, status)
             return
+        if parsed.path.startswith("/api/issues/") and parsed.path.endswith("/webhook/latest"):
+            if not self._require_admin():
+                return
+            issue_key = parsed.path.split("/")[3]
+            event = self.server.service.latest_webhook_event_for_issue(issue_key)
+            if event is None:
+                _json_response(self, HTTPStatus.NOT_FOUND, {"error": "issue_webhook_not_found", "issue_key": issue_key.upper()})
+                return
+            _json_response(self, HTTPStatus.OK, event)
+            return
         if parsed.path.startswith("/api/runs/"):
             if not self._require_admin():
                 return
@@ -207,6 +217,8 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
                 _server_log(
                     f"[webhook] received path={parsed.path} event={event_type or 'unknown'} issue={issue_key or '-'}"
                 )
+                if issue_key:
+                    self.server.service.record_webhook_event(issue_key, body)
                 provided_secret = _webhook_secret(self)
                 provided_signature = _webhook_signature(self)
                 webhook_timestamp = _webhook_timestamp(self)

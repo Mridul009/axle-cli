@@ -28,6 +28,7 @@ Usage:
   axle-demo-docker.sh latest-watch
   axle-demo-docker.sh latest-issue <issue_key>
   axle-demo-docker.sh webhook-status <issue_key>
+  axle-demo-docker.sh webhook-event <issue_key>
   axle-demo-docker.sh show-issue <issue_key>
   axle-demo-docker.sh watch-issue <issue_key>
   axle-demo-docker.sh pr-issue <issue_key>
@@ -58,6 +59,7 @@ Examples:
   ./ops/axle-demo-docker.sh latest-watch
   ./ops/axle-demo-docker.sh watch-issue KAN-9803
   ./ops/axle-demo-docker.sh webhook-status KAN-9803
+  ./ops/axle-demo-docker.sh webhook-event KAN-9803
   ./ops/axle-demo-docker.sh jira-multifile
 EOF
 }
@@ -84,6 +86,12 @@ fetch_issue_latest_run_json() {
 fetch_issue_status_json() {
   local issue_key="$1"
   curl -fsS "${BASE_URL}/api/issues/${issue_key}/status" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}"
+}
+
+fetch_issue_webhook_json() {
+  local issue_key="$1"
+  curl -fsS "${BASE_URL}/api/issues/${issue_key}/webhook/latest" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}"
 }
 
@@ -377,6 +385,22 @@ webhook_status() {
   fi
 }
 
+webhook_event() {
+  local issue_key="$1"
+  local json
+  json="$(fetch_issue_webhook_json "$issue_key")"
+  AXLE_DEMO_PAYLOAD="$json" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["AXLE_DEMO_PAYLOAD"])
+print(f"issue_key: {payload.get('issue_key', '')}")
+print(f"received_at: {payload.get('received_at', '')}")
+print("payload:")
+print(json.dumps(payload.get("payload", {}), indent=2))
+PY
+}
+
 main() {
   local cmd="${1:-}"
   local json
@@ -425,6 +449,10 @@ main() {
     webhook-status)
       require_arg "$@"
       webhook_status "$2"
+      ;;
+    webhook-event)
+      require_arg "$@"
+      webhook_event "$2"
       ;;
     show-issue)
       require_arg "$@"

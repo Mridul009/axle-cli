@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from pathlib import Path
 
@@ -39,6 +40,34 @@ class CoordinatorService:
         store_root = getattr(self.store, "root", None)
         default_artifact_root = Path(store_root) / "artifacts" if store_root else None
         self.artifact_store = artifact_store or build_artifact_store(root=default_artifact_root)
+        self.webhook_events_dir = Path(store_root) / "webhook-events" if store_root else None
+        if self.webhook_events_dir is not None:
+            self.webhook_events_dir.mkdir(parents=True, exist_ok=True)
+
+    def _webhook_event_path(self, issue_key: str) -> Path | None:
+        if self.webhook_events_dir is None:
+            return None
+        normalized = issue_key.strip().upper()
+        if not normalized:
+            return None
+        return self.webhook_events_dir / f"{normalized}.json"
+
+    def record_webhook_event(self, issue_key: str, payload: dict[str, Any]) -> None:
+        path = self._webhook_event_path(issue_key)
+        if path is None:
+            return
+        body = {
+            "issue_key": issue_key.strip().upper(),
+            "received_at": utc_now().isoformat(),
+            "payload": payload,
+        }
+        path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+
+    def latest_webhook_event_for_issue(self, issue_key: str) -> dict[str, Any] | None:
+        path = self._webhook_event_path(issue_key)
+        if path is None or not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def latest_run_for_issue(self, issue_key: str) -> AutomationRun | None:
         if not hasattr(self.store, "latest_run_for_issue"):
