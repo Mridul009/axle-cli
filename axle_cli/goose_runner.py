@@ -278,7 +278,6 @@ def build_command(
     command = [
         resolved,
         "run",
-        "--no-profile",
         "--output-format",
         output_format,
     ]

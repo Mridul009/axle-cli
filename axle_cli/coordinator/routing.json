@@ -22,7 +22,7 @@
     "KAN": {
       "repository": "https://github.com/Mridul009/lister",
       "base_branch": "main",
-      "test_command": "python manage.py test"
+      "test_command": "python -m pip install django && python manage.py test"
     },
     "APP": {
       "profile": "frontend",
