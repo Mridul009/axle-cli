@@ -995,6 +995,29 @@ class CoordinatorWorkerTests(unittest.TestCase):
             sqlite_store = factory.open_run_store(root=Path(tempdir.name))
         self.assertEqual(sqlite_store.__class__.__name__, "SqliteRunStore")
 
+    def test_file_run_store_skips_malformed_run_files_during_issue_lookup(self):
+        tempdir = self._temp_root()
+        store_cls = self._get_attr(self._import_any("axle_cli.coordinator.run_store"), "FileBackedRunStore")
+        store = self._build_store(store_cls, Path(tempdir.name))
+
+        created = store.create_run(
+            {
+                "run_id": "valid-run",
+                "issue_key": "APP-777",
+                "repository": "https://github.com/acme/widgets.git",
+                "base_branch": "main",
+                "task": "Keep issue lookup working",
+                "status": "queued",
+            }
+        )
+        corrupt_path = Path(store.root) / "runs" / "corrupt-run.json"
+        corrupt_path.write_text("", encoding="utf-8")
+
+        latest = store.latest_run_for_issue("APP-777")
+
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.run_id, created.run_id)
+
     def test_file_artifact_store_persists_workspace_artifacts_and_summary(self):
         tempdir = self._temp_root()
         artifact_module = self._import_any("axle_cli.coordinator.artifact_store")

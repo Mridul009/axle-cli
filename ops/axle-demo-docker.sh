@@ -3,7 +3,7 @@ set -euo pipefail
 
 COORDINATOR_CONTAINER="${AXLE_DEMO_COORDINATOR_CONTAINER:-axle-coordinator}"
 WORKER_CONTAINER="${AXLE_DEMO_WORKER_CONTAINER:-axle-worker}"
-BASE_URL="${AXLE_DEMO_BASE_URL:-http://127.0.0.1}"
+BASE_URL="${AXLE_DEMO_BASE_URL:-http://127.0.0.1:8080}"
 ADMIN_TOKEN="${AXLE_DEMO_ADMIN_TOKEN:-change-me-admin}"
 POLL_SECONDS="${AXLE_DEMO_POLL_SECONDS:-2}"
 CLI_HOME="${AXLE_DEMO_CLI_HOME:-/data/.axle-cli}"
@@ -43,7 +43,7 @@ Usage:
 Environment overrides:
   AXLE_DEMO_COORDINATOR_CONTAINER   default: axle-coordinator
   AXLE_DEMO_WORKER_CONTAINER        default: axle-worker
-  AXLE_DEMO_BASE_URL                default: http://127.0.0.1
+  AXLE_DEMO_BASE_URL                default: http://127.0.0.1:8080
   AXLE_DEMO_ADMIN_TOKEN             default: change-me-admin
   AXLE_DEMO_POLL_SECONDS            default: 2
   AXLE_DEMO_LOG_TAIL                default: 200
@@ -243,6 +243,25 @@ if payload.get("pr_url"):
 PY
 }
 
+print_webhook_event_summary() {
+  local payload
+  payload="$(cat)"
+
+  AXLE_DEMO_PAYLOAD="$payload" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["AXLE_DEMO_PAYLOAD"])
+print(f"webhook_received_at: {payload.get('received_at', '')}")
+print(f"webhook_updated_at: {payload.get('updated_at') or '-'}")
+print(f"webhook_processing_status: {payload.get('processing_status') or 'received'}")
+if payload.get("run_id"):
+    print(f"webhook_run_id: {payload['run_id']}")
+if payload.get("error"):
+    print(f"webhook_error: {payload['error']}")
+PY
+}
+
 watch_run() {
   local run_id="$1"
 
@@ -271,6 +290,7 @@ PY
 
 watch_issue() {
   local issue_key="$1"
+  local json
 
   while true; do
     try_fetch_issue_status_json "$issue_key"
@@ -278,7 +298,12 @@ watch_issue() {
     if [[ "$ISSUE_STATUS_HTTP_CODE" == "404" ]]; then
       printf 'issue_key: %s\n' "$issue_key"
       printf 'status: waiting\n'
-      printf 'last_event: waiting for first run to be created\n'
+      if json="$(fetch_issue_webhook_json "$issue_key" 2>/dev/null)"; then
+        printf 'last_event: webhook received but no run exists yet\n'
+        printf '%s\n' "$json" | print_webhook_event_summary
+      else
+        printf 'last_event: waiting for first run to be created\n'
+      fi
       sleep "$POLL_SECONDS"
       continue
     fi
@@ -293,7 +318,6 @@ watch_issue() {
       return 1
     fi
 
-    local json
     json="$ISSUE_STATUS_BODY"
     printf '%s\n' "$json" | print_issue_status_summary
 
@@ -348,6 +372,7 @@ EOF
 
 webhook_status() {
   local issue_key="$1"
+  local json
   local recent_logs
 
   printf 'issue_key: %s\n' "$issue_key"
@@ -365,7 +390,12 @@ webhook_status() {
   elif [[ "$ISSUE_STATUS_HTTP_CODE" == "404" ]]; then
     printf 'webhook_status: no_run_found\n'
     printf 'status: waiting\n'
-    printf 'last_event: no webhook-created run exists for this issue yet\n'
+    if json="$(fetch_issue_webhook_json "$issue_key" 2>/dev/null)"; then
+      printf 'last_event: webhook received but no run exists yet\n'
+      printf '%s\n' "$json" | print_webhook_event_summary
+    else
+      printf 'last_event: no webhook-created run exists for this issue yet\n'
+    fi
   else
     printf 'webhook_status: error\n'
     printf 'status_code: %s\n' "$ISSUE_STATUS_HTTP_CODE"
@@ -396,6 +426,12 @@ import os
 payload = json.loads(os.environ["AXLE_DEMO_PAYLOAD"])
 print(f"issue_key: {payload.get('issue_key', '')}")
 print(f"received_at: {payload.get('received_at', '')}")
+print(f"updated_at: {payload.get('updated_at') or '-'}")
+print(f"processing_status: {payload.get('processing_status') or 'received'}")
+if payload.get("run_id"):
+    print(f"run_id: {payload['run_id']}")
+if payload.get("error"):
+    print(f"error: {payload['error']}")
 print("payload:")
 print(json.dumps(payload.get("payload", {}), indent=2))
 PY

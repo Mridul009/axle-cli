@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 from pathlib import Path
+from uuid import uuid4
 
 from ..jira import fetch_jira_issue
 from ..models import AutomationRun, RunEvent, RunSummary, SavedConfig, utc_now
@@ -52,22 +53,49 @@ class CoordinatorService:
             return None
         return self.webhook_events_dir / f"{normalized}.json"
 
-    def record_webhook_event(self, issue_key: str, payload: dict[str, Any]) -> None:
+    def _write_json_atomic(self, path: Path, payload: dict[str, Any]) -> None:
+        temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temp_path.replace(path)
+
+    def record_webhook_event(
+        self,
+        issue_key: str,
+        payload: dict[str, Any],
+        *,
+        processing_status: str = "received",
+        run_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
         path = self._webhook_event_path(issue_key)
         if path is None:
             return
+        existing: dict[str, Any] = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+        received_at = str(existing.get("received_at") or utc_now().isoformat())
         body = {
             "issue_key": issue_key.strip().upper(),
-            "received_at": utc_now().isoformat(),
+            "received_at": received_at,
+            "updated_at": utc_now().isoformat(),
+            "processing_status": processing_status,
+            "run_id": run_id,
+            "error": error,
             "payload": payload,
         }
-        path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+        self._write_json_atomic(path, body)
 
     def latest_webhook_event_for_issue(self, issue_key: str) -> dict[str, Any] | None:
         path = self._webhook_event_path(issue_key)
         if path is None or not path.exists():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
 
     def latest_run_for_issue(self, issue_key: str) -> AutomationRun | None:
         if not hasattr(self.store, "latest_run_for_issue"):

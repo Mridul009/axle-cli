@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from json import JSONDecodeError
 from uuid import uuid4
 
 from ..config import settings
@@ -32,6 +33,18 @@ class _FileRunStoreBackend:
         sanitized = worker_id.replace("/", "_")
         return self.workers_dir / f"{sanitized}.json"
 
+    def _write_json_atomic(self, path: Path, payload: dict[str, object]) -> None:
+        temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temp_path.replace(path)
+
+    def _read_run_path(self, path: Path) -> AutomationRun:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return AutomationRun.from_json(payload)
+        except (JSONDecodeError, TypeError, KeyError, ValueError) as exc:
+            raise ValueError(f"Run file `{path}` is not a valid run record.") from exc
+
     def _coerce_run(self, run: AutomationRun | dict[str, object]) -> AutomationRun:
         if isinstance(run, AutomationRun):
             return run
@@ -57,20 +70,25 @@ class _FileRunStoreBackend:
             record.created_at = now
         if record.updated_at is None:
             record.updated_at = now
-        self._path_for(record.run_id).write_text(json.dumps(record.to_json(), indent=2) + "\n", encoding="utf-8")
+        self._write_json_atomic(self._path_for(record.run_id), record.to_json())
         return record
 
     save_run = create_run
 
     def get_run(self, run_id: str) -> AutomationRun:
         path = self._path_for(run_id)
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return AutomationRun.from_json(payload)
+        return self._read_run_path(path)
 
     load_run = get_run
 
     def list_runs(self) -> list[AutomationRun]:
-        return [self.get_run(path.stem) for path in sorted(self.runs_dir.glob("*.json"))]
+        runs: list[AutomationRun] = []
+        for path in sorted(self.runs_dir.glob("*.json")):
+            try:
+                runs.append(self._read_run_path(path))
+            except (OSError, ValueError):
+                continue
+        return runs
 
     def latest_run_for_issue(self, issue_key: str) -> AutomationRun | None:
         normalized = issue_key.strip().upper()
@@ -120,7 +138,10 @@ class _FileRunStoreBackend:
             key=lambda path: (path.stat().st_mtime, path.name),
         )
         for path in candidates:
-            run = self.get_run(path.stem)
+            try:
+                run = self._read_run_path(path)
+            except (OSError, ValueError):
+                continue
             if run.status != "queued":
                 continue
             run.status = "running"
