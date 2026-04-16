@@ -47,6 +47,9 @@ def _jira_headers() -> dict[str, str]:
     }
 
 
+_JIRA_ISSUE_FIELDS = "summary,description,comment,project,issuetype,labels,components,priority,status,assignee,reporter,parent"
+
+
 def test_jira_connection(base_url: str, email: str, api_token: str) -> dict[str, Any]:
     normalized_base_url = _normalize_base_url(base_url)
     if not normalized_base_url:
@@ -213,13 +216,42 @@ def fetch_jira_issue(config: SavedConfig, issue_key: str) -> dict[str, Any]:
         f"{base_url}/rest/api/3/issue/{normalized_issue_key}",
         headers=_jira_headers(),
         auth=_jira_auth(email, api_token),
-        params={
-            "fields": "summary,description,comment,project,issuetype,labels,components,priority,status,assignee,reporter,parent",
-        },
+        params={"fields": _JIRA_ISSUE_FIELDS},
         timeout=30,
     )
     response.raise_for_status()
     return normalize_jira_issue(response.json(), base_url=base_url)
+
+
+def fetch_jira_issues_by_jql(config: SavedConfig, jql: str, max_results: int = 50) -> list[dict[str, Any]]:
+    normalized_jql = jql.strip()
+    if not normalized_jql:
+        raise ValueError("A Jira JQL query is required.")
+    if max_results < 1:
+        raise ValueError("max_results must be greater than zero.")
+
+    base_url, email, api_token = _require_jira_credentials(config)
+    response = requests.get(
+        f"{base_url}/rest/api/3/search/jql",
+        headers=_jira_headers(),
+        auth=_jira_auth(email, api_token),
+        params={
+            "jql": normalized_jql,
+            "maxResults": max_results,
+            "fields": _JIRA_ISSUE_FIELDS,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    issues = response.json().get("issues") or []
+    return [normalize_jira_issue(issue, base_url=base_url) for issue in issues]
+
+
+def fetch_jira_epic_children(config: SavedConfig, epic_key: str, max_results: int = 50) -> list[dict[str, Any]]:
+    normalized_epic_key = epic_key.strip().upper()
+    if not normalized_epic_key:
+        raise ValueError("A Jira epic key is required.")
+    return fetch_jira_issues_by_jql(config, f"parent = {normalized_epic_key}", max_results=max_results)
 
 
 def add_jira_comment(config: SavedConfig, issue_key: str, body: str) -> dict[str, Any]:

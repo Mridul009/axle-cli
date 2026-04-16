@@ -281,6 +281,203 @@ class CoordinatorWorkerTests(unittest.TestCase):
         self.assertEqual(mapping.get("status"), "queued")
         self.assertIn("Demo webhook fallback", mapping.get("task", ""))
 
+    def test_jira_epic_webhook_fans_out_to_active_child_runs(self):
+        tempdir = self._temp_root()
+        webhook = self._import_any("axle_cli.coordinator.webhook_service")
+        run_store = self._import_any("axle_cli.coordinator.run_store")
+        models = self._import_any("axle_cli.models")
+        store = self._build_store(self._get_attr(run_store, "FileBackedRunStore"), Path(tempdir.name))
+
+        epic_issue = {
+            "key": "APP-100",
+            "summary": "Build multi-file epic",
+            "description": "Fan out children",
+            "project_key": "APP",
+            "issue_type": "Epic",
+            "labels": ["axle-run"],
+            "status": "In Progress",
+        }
+        child_issues = [
+            {
+                "key": "APP-101",
+                "summary": "First child",
+                "description": "Change multiple files",
+                "project_key": "APP",
+                "issue_type": "Task",
+                "status": "To Do",
+            },
+            {
+                "key": "APP-102",
+                "summary": "Second child",
+                "description": "Change tests too",
+                "project_key": "APP",
+                "issue_type": "Task",
+                "status": "In Progress",
+            },
+            {
+                "key": "APP-103",
+                "summary": "Finished child",
+                "description": "Already done",
+                "project_key": "APP",
+                "issue_type": "Task",
+                "status": "Done",
+            },
+        ]
+        payload = {
+            "webhookEvent": "jira:issue_updated",
+            "issue": {
+                "key": "APP-100",
+                "fields": {
+                    "summary": "Build multi-file epic",
+                    "description": "Fan out children",
+                    "project": {"key": "APP"},
+                    "issuetype": {"name": "Epic"},
+                    "labels": ["axle-run"],
+                    "status": {"name": "In Progress"},
+                    "updated": "2026-04-17T10:00:00.000+0000",
+                },
+            },
+        }
+        config = models.SavedConfig(
+            repository="https://github.com/acme/widgets.git",
+            base_branch="main",
+            jira_base_url="https://example.atlassian.net",
+            jira_email="demo@example.com",
+            jira_api_token="token",
+        )
+
+        with mock.patch("axle_cli.coordinator.api.fetch_jira_issue", return_value=epic_issue):
+            with mock.patch.object(webhook, "fetch_jira_epic_children", return_value=child_issues) as child_fetch:
+                parent = webhook.handle_jira_webhook(payload, config, store=store)
+
+        runs = {run.issue_key: run for run in store.list_runs()}
+        self.assertEqual(parent.issue_key, "APP-100")
+        self.assertEqual(set(runs), {"APP-100", "APP-101", "APP-102"})
+        child_fetch.assert_called_once_with(config, "APP-100", max_results=50)
+        self.assertTrue(any(event.kind == "epic_fanout" for event in runs["APP-100"].events))
+        self.assertTrue(any(event.kind == "epic_child" for event in runs["APP-101"].events))
+
+    def test_jira_epic_webhook_replay_does_not_duplicate_child_runs(self):
+        tempdir = self._temp_root()
+        webhook = self._import_any("axle_cli.coordinator.webhook_service")
+        run_store = self._import_any("axle_cli.coordinator.run_store")
+        models = self._import_any("axle_cli.models")
+        store = self._build_store(self._get_attr(run_store, "FileBackedRunStore"), Path(tempdir.name))
+
+        epic_issue = {
+            "key": "APP-200",
+            "summary": "Replay-safe epic",
+            "description": "Create children once",
+            "project_key": "APP",
+            "issue_type": "Epic",
+            "labels": ["axle-run"],
+            "status": "In Progress",
+        }
+        payload = {
+            "webhookEvent": "jira:issue_updated",
+            "issue": {
+                "key": "APP-200",
+                "fields": {
+                    "summary": "Replay-safe epic",
+                    "project": {"key": "APP"},
+                    "issuetype": {"name": "Epic"},
+                    "labels": ["axle-run"],
+                    "status": {"name": "In Progress"},
+                    "updated": "2026-04-17T11:00:00.000+0000",
+                },
+            },
+        }
+        config = models.SavedConfig(
+            repository="https://github.com/acme/widgets.git",
+            base_branch="main",
+            jira_base_url="https://example.atlassian.net",
+            jira_email="demo@example.com",
+            jira_api_token="token",
+        )
+        children = [
+            {
+                "key": "APP-201",
+                "summary": "Child",
+                "description": "One child",
+                "project_key": "APP",
+                "issue_type": "Task",
+                "status": "To Do",
+            }
+        ]
+
+        with mock.patch("axle_cli.coordinator.api.fetch_jira_issue", return_value=epic_issue):
+            with mock.patch.object(webhook, "fetch_jira_epic_children", return_value=children) as child_fetch:
+                first = webhook.handle_jira_webhook(payload, config, store=store)
+                second = webhook.handle_jira_webhook(payload, config, store=store)
+
+        self.assertEqual(first.run_id, second.run_id)
+        self.assertEqual(len(store.list_runs()), 2)
+        child_fetch.assert_called_once()
+
+    def test_jira_epic_webhook_requires_fanout_label(self):
+        tempdir = self._temp_root()
+        webhook = self._import_any("axle_cli.coordinator.webhook_service")
+        run_store = self._import_any("axle_cli.coordinator.run_store")
+        models = self._import_any("axle_cli.models")
+        store = self._build_store(self._get_attr(run_store, "FileBackedRunStore"), Path(tempdir.name))
+
+        epic_issue = {
+            "key": "APP-300",
+            "summary": "Unlabeled epic",
+            "description": "Should not fan out",
+            "project_key": "APP",
+            "issue_type": "Epic",
+            "labels": [],
+            "status": "In Progress",
+        }
+        payload = {
+            "webhookEvent": "jira:issue_updated",
+            "issue": {
+                "key": "APP-300",
+                "fields": {
+                    "summary": "Unlabeled epic",
+                    "project": {"key": "APP"},
+                    "issuetype": {"name": "Epic"},
+                    "labels": [],
+                    "status": {"name": "In Progress"},
+                },
+            },
+        }
+        config = models.SavedConfig(repository="https://github.com/acme/widgets.git", base_branch="main")
+
+        with mock.patch("axle_cli.coordinator.api.fetch_jira_issue", return_value=epic_issue):
+            with mock.patch.object(webhook, "fetch_jira_epic_children", return_value=[]) as child_fetch:
+                webhook.handle_jira_webhook(payload, config, store=store)
+
+        self.assertEqual(len(store.list_runs()), 1)
+        child_fetch.assert_not_called()
+
+    def test_multiple_workers_claim_distinct_epic_child_runs(self):
+        tempdir = self._temp_root()
+        run_store = self._import_any("axle_cli.coordinator.run_store")
+        store = self._build_store(self._get_attr(run_store, "FileBackedRunStore"), Path(tempdir.name))
+        for index in range(3):
+            store.create_run(
+                {
+                    "run_id": f"child-{index}",
+                    "issue_key": f"APP-{400 + index}",
+                    "repository": "https://github.com/acme/widgets.git",
+                    "base_branch": "main",
+                    "task": f"Child {index}",
+                    "status": "queued",
+                }
+            )
+
+        claimed = []
+        for worker_id in ("worker-a", "worker-b", "worker-c"):
+            store.register_worker(worker_id, hostname=worker_id)
+            run = store.claim_next_queued_run(worker_id)
+            self.assertIsNotNone(run)
+            claimed.append(run.run_id)
+
+        self.assertEqual(len(set(claimed)), 3)
+        self.assertEqual({store.get_run(run_id).status for run_id in claimed}, {"running"})
+
     def test_routing_config_applies_project_label_and_component_rules(self):
         tempdir = self._temp_root()
         router = self._import_any("axle_cli.coordinator.router")

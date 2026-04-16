@@ -444,6 +444,62 @@ class SetupFeatureTests(unittest.TestCase):
         self.assertIn("Additional operator instructions:", task_text)
         jira_get.assert_called_once()
 
+    def test_fetch_jira_issues_by_jql_normalizes_search_results(self):
+        self._temp_runtime()
+        _, _, _, jira, _ = self._load_runtime_modules()
+        config = SavedConfig(
+            jira_base_url="https://acme.atlassian.net",
+            jira_email="me@example.com",
+            jira_api_token="jira-token",
+        )
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "issues": [
+                {
+                    "key": "APP-124",
+                    "fields": {
+                        "summary": "Child task",
+                        "description": {"type": "doc", "content": []},
+                        "project": {"key": "APP", "name": "Analytics Platform"},
+                        "issuetype": {"name": "Task"},
+                        "status": {"name": "To Do"},
+                        "parent": {"key": "APP-100"},
+                    },
+                }
+            ]
+        }
+
+        with mock.patch.object(jira.requests, "get", return_value=response) as jira_get:
+            issues = jira.fetch_jira_issues_by_jql(config, " project = APP ", max_results=25)
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["key"], "APP-124")
+        self.assertEqual(issues[0]["summary"], "Child task")
+        self.assertEqual(issues[0]["parent_key"], "APP-100")
+        self.assertEqual(issues[0]["url"], "https://acme.atlassian.net/browse/APP-124")
+        jira_get.assert_called_once()
+        self.assertEqual(jira_get.call_args.args[0], "https://acme.atlassian.net/rest/api/3/search/jql")
+        self.assertEqual(
+            jira_get.call_args.kwargs["params"],
+            {
+                "jql": "project = APP",
+                "maxResults": 25,
+                "fields": "summary,description,comment,project,issuetype,labels,components,priority,status,assignee,reporter,parent",
+            },
+        )
+
+    def test_fetch_jira_epic_children_searches_by_parent(self):
+        self._temp_runtime()
+        _, _, _, jira, _ = self._load_runtime_modules()
+        config = SavedConfig(jira_base_url="https://acme.atlassian.net")
+
+        with mock.patch.object(jira, "fetch_jira_issues_by_jql", return_value=[]) as fetch_by_jql:
+            result = jira.fetch_jira_epic_children(config, " app-100 ", max_results=10)
+
+        self.assertEqual(result, [])
+        fetch_by_jql.assert_called_once_with(config, "parent = APP-100", max_results=10)
+
     def test_handle_jira_get_prints_issue_details(self):
         self._temp_runtime()
         _, _, _, _, main = self._load_runtime_modules()

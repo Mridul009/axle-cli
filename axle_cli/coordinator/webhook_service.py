@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
 from typing import Any
 
-from ..jira import normalize_jira_issue
-from ..models import AutomationRun, SavedConfig
+from ..jira import fetch_jira_epic_children, normalize_jira_issue
+from ..models import AutomationRun, RunEvent, SavedConfig
 from .idempotency import (
     FileWebhookIdempotencyLedger,
     normalize_webhook_event_key,
@@ -32,6 +32,13 @@ SUPPORTED_WEBHOOK_EVENT_TYPES = {
     "issue_updated",
 }
 CLOCK_SKEW_SECONDS = 300
+EPIC_FANOUT_LABEL_ENV_VAR = "AXLE_EPIC_FANOUT_LABEL"
+EPIC_FANOUT_MAX_CHILDREN_ENV_VAR = "AXLE_EPIC_FANOUT_MAX_CHILDREN"
+DEFAULT_EPIC_FANOUT_LABEL = "axle-run"
+DEFAULT_EPIC_FANOUT_MAX_CHILDREN = 50
+EPIC_ISSUE_TYPE_NAMES = {"epic"}
+EPIC_FANOUT_STATUSES = {"in progress"}
+SKIPPED_EPIC_CHILD_STATUSES = {"done", "closed", "cancelled", "canceled"}
 
 
 def _configured_webhook_secret(explicit: str | None = None) -> str | None:
@@ -173,6 +180,157 @@ def _derived_run_id(event_key: str) -> str:
     return str(uuid5(NAMESPACE_URL, event_key))
 
 
+def _normalized_text(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _issue_labels(issue: dict[str, Any]) -> set[str]:
+    labels = issue.get("labels") or []
+    if not isinstance(labels, list):
+        return set()
+    return {_normalized_text(label) for label in labels if _normalized_text(label)}
+
+
+def _epic_fanout_label() -> str:
+    return (os.getenv(EPIC_FANOUT_LABEL_ENV_VAR) or DEFAULT_EPIC_FANOUT_LABEL).strip().lower()
+
+
+def _epic_fanout_max_children() -> int:
+    raw = (os.getenv(EPIC_FANOUT_MAX_CHILDREN_ENV_VAR) or "").strip()
+    if not raw:
+        return DEFAULT_EPIC_FANOUT_MAX_CHILDREN
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_EPIC_FANOUT_MAX_CHILDREN
+
+
+def _is_epic_ready_for_fanout(issue: dict[str, Any]) -> bool:
+    issue_type = _normalized_text(issue.get("issue_type") or issue.get("type") or issue.get("issuetype"))
+    status = _normalized_text(issue.get("status"))
+    required_label = _epic_fanout_label()
+    labels = _issue_labels(issue)
+    return issue_type in EPIC_ISSUE_TYPE_NAMES and status in EPIC_FANOUT_STATUSES and (not required_label or required_label in labels)
+
+
+def _child_issue_is_active(issue: dict[str, Any]) -> bool:
+    status = _normalized_text(issue.get("status"))
+    return status not in SKIPPED_EPIC_CHILD_STATUSES
+
+
+def _create_child_run_from_epic(
+    *,
+    service: Any,
+    ledger: FileWebhookIdempotencyLedger,
+    parent_run: AutomationRun,
+    parent_event_key: str,
+    event_type: str | None,
+    child_issue: dict[str, Any],
+    launch_worker: bool,
+    coordinator_url: str | None,
+    provided_signature: str | None,
+) -> AutomationRun | None:
+    child_key = str(child_issue.get("key") or child_issue.get("issue_key") or "").strip().upper()
+    if not child_key or not _child_issue_is_active(child_issue):
+        return None
+    child_event_key = f"{parent_event_key}:child:{child_key}"
+    child_reservation = ledger.reserve(
+        child_event_key,
+        _derived_run_id(child_event_key),
+        payload=child_issue,
+        event_type=event_type,
+        signature_digest=_normalize_signature(provided_signature),
+    )
+    if child_reservation.duplicate:
+        try:
+            return service.store.get_run(child_reservation.run_id)
+        except FileNotFoundError:
+            pass
+    child_run = service.create_run_from_issue(
+        child_issue,
+        launch_worker=launch_worker,
+        coordinator_url=coordinator_url,
+        run_id=child_reservation.run_id,
+        event_stage="Epic Fan-out",
+    )
+    child_run.events.append(
+        RunEvent(
+            kind="epic_child",
+            stage="Webhook",
+            message=f"Created from epic {parent_run.issue_key}.",
+            details={"epic_run_id": parent_run.run_id, "epic_issue_key": parent_run.issue_key},
+        )
+    )
+    service.store.create_run(child_run)
+    ledger.commit(child_reservation)
+    return child_run
+
+
+def _fan_out_epic_children(
+    *,
+    service: Any,
+    ledger: FileWebhookIdempotencyLedger,
+    parent_run: AutomationRun,
+    parent_issue: dict[str, Any],
+    parent_event_key: str,
+    event_type: str | None,
+    launch_worker: bool,
+    coordinator_url: str | None,
+    provided_signature: str | None,
+) -> AutomationRun:
+    if not _is_epic_ready_for_fanout(parent_issue):
+        return parent_run
+
+    created: list[str] = []
+    skipped: list[str] = []
+    try:
+        child_issues = fetch_jira_epic_children(
+            service.config,
+            parent_run.issue_key,
+            max_results=_epic_fanout_max_children(),
+        )
+        for child_issue in child_issues:
+            child_key = str(child_issue.get("key") or child_issue.get("issue_key") or "").strip().upper()
+            if child_key and not _child_issue_is_active(child_issue):
+                skipped.append(child_key)
+                continue
+            child_run = _create_child_run_from_epic(
+                service=service,
+                ledger=ledger,
+                parent_run=parent_run,
+                parent_event_key=parent_event_key,
+                event_type=event_type,
+                child_issue=child_issue,
+                launch_worker=launch_worker,
+                coordinator_url=coordinator_url,
+                provided_signature=provided_signature,
+            )
+            if child_run is not None:
+                created.append(child_run.issue_key)
+    except Exception as exc:
+        parent_run.events.append(
+            RunEvent(
+                kind="epic_fanout_failed",
+                stage="Webhook",
+                message=f"Epic fan-out failed: {exc}",
+            )
+        )
+        return service.store.create_run(parent_run)
+
+    parent_run.events.append(
+        RunEvent(
+            kind="epic_fanout",
+            stage="Webhook",
+            message=f"Epic fan-out queued {len(created)} child run(s).",
+            details={
+                "child_issue_keys": ",".join(created),
+                "skipped_issue_keys": ",".join(skipped),
+            },
+        )
+    )
+    return service.store.create_run(parent_run)
+
+
 def handle_jira_webhook(
     payload: dict[str, object],
     config: SavedConfig,
@@ -230,6 +388,17 @@ def handle_jira_webhook(
             run_id=reservation.run_id,
             event_stage="Webhook",
         )
+    run = _fan_out_epic_children(
+        service=service,
+        ledger=ledger,
+        parent_run=run,
+        parent_issue=issue,
+        parent_event_key=event_key,
+        event_type=event_type,
+        launch_worker=launch_worker,
+        coordinator_url=coordinator_url,
+        provided_signature=provided_signature,
+    )
     ledger.commit(reservation)
     return run
 
