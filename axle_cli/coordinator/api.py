@@ -102,6 +102,12 @@ class CoordinatorService:
             return None
         return self.store.latest_run_for_issue(issue_key)  # type: ignore[attr-defined]
 
+    def list_runs(self) -> list[AutomationRun]:
+        if not hasattr(self.store, "list_runs"):
+            return []
+        runs = self.store.list_runs()  # type: ignore[attr-defined]
+        return sorted(runs, key=lambda run: (run.created_at, run.updated_at or run.created_at, run.run_id), reverse=True)
+
     def issue_status(self, issue_key: str) -> dict[str, Any] | None:
         run = self.latest_run_for_issue(issue_key)
         if run is None:
@@ -211,6 +217,128 @@ class CoordinatorService:
             raise ValueError("The configured run store does not support queue claiming.")
         return self.store.claim_next_queued_run(worker_id)  # type: ignore[attr-defined]
 
+    def list_queues(self) -> list[dict[str, object]]:
+        if hasattr(self.store, "list_queues"):
+            return self.store.list_queues()  # type: ignore[attr-defined]
+        queues: dict[str, dict[str, object]] = {}
+        for run in self.store.list_runs():
+            queue_name = run.queue_name or "default"
+            queue = queues.setdefault(queue_name, {"queue_name": queue_name, "total": 0})
+            queue[run.status] = int(queue.get(run.status, 0)) + 1
+            queue["total"] = int(queue.get("total", 0)) + 1
+        return sorted(queues.values(), key=lambda item: str(item["queue_name"]))
+
+    def run_events(self, run_id: str) -> list[dict[str, Any]]:
+        run = self.store.get_run(run_id)
+        return [event.to_json() for event in run.events]
+
+    def run_timeline(self, run_id: str) -> dict[str, Any]:
+        run = self.store.get_run(run_id)
+        return {
+            "run_id": run.run_id,
+            "issue_key": run.issue_key,
+            "status": run.status,
+            "created_at": run.created_at.isoformat() if run.created_at else None,
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "events": [event.to_json() for event in run.events],
+        }
+
+    def run_artifacts(self, run_id: str) -> dict[str, Any]:
+        self.store.get_run(run_id)
+        return self.artifact_store.load_manifest(run_id)
+
+    def read_run_artifact(self, run_id: str, name: str) -> str:
+        self.store.get_run(run_id)
+        return self.artifact_store.read_artifact(run_id, name)
+
+    def pause_run(self, run_id: str, *, reason: str | None = None) -> AutomationRun:
+        run = self.store.get_run(run_id)
+        if run.status not in {"queued", "planned", "launching"}:
+            raise ValueError(f"Run `{run_id}` cannot be paused from status `{run.status}`.")
+        previous_status = run.status
+        run.status = "paused"
+        run.paused_reason = (reason or "").strip() or None
+        run.paused_from_status = previous_status
+        run.updated_at = utc_now()
+        run.events.append(
+            RunEvent(
+                kind="paused",
+                stage="Queue",
+                message=f"Run paused from `{previous_status}`.",
+                details={"reason": run.paused_reason or ""},
+            )
+        )
+        return self.store.create_run(run)
+
+    def resume_run(self, run_id: str) -> AutomationRun:
+        run = self.store.get_run(run_id)
+        if run.status != "paused":
+            raise ValueError(f"Run `{run_id}` is not paused.")
+        resumed_status = run.paused_from_status if run.paused_from_status in {"queued", "planned", "launching"} else "queued"
+        run.status = resumed_status
+        run.paused_reason = None
+        run.paused_from_status = None
+        run.updated_at = utc_now()
+        run.events.append(RunEvent(kind="resumed", stage="Queue", message=f"Run resumed as `{resumed_status}`."))
+        return self.store.create_run(run)
+
+    def cancel_run(self, run_id: str, *, reason: str | None = None) -> AutomationRun:
+        run = self.store.get_run(run_id)
+        if run.status in {"completed", "failed", "cancelled"}:
+            raise ValueError(f"Run `{run_id}` cannot be cancelled from status `{run.status}`.")
+        now = utc_now()
+        clean_reason = (reason or "").strip() or None
+        if run.status == "running":
+            run.status = "cancel_requested"
+            run.cancel_requested_at = now
+            message = "Cancellation requested for running run."
+            kind = "cancel_requested"
+        else:
+            run.status = "cancelled"
+            run.cancelled_at = now
+            run.finished_at = now
+            run.result = "cancelled"
+            message = "Run cancelled before execution."
+            kind = "cancelled"
+        run.updated_at = now
+        run.events.append(RunEvent(kind=kind, stage="Queue", message=message, details={"reason": clean_reason or ""}))
+        return self.store.create_run(run)
+
+    def retry_run(self, run_id: str, *, force: bool = False) -> AutomationRun:
+        run = self.store.get_run(run_id)
+        if run.status not in {"failed", "cancelled", "completed"}:
+            raise ValueError(f"Run `{run_id}` cannot be retried from status `{run.status}`.")
+        if not force and run.retry_count >= run.max_retries:
+            raise ValueError(f"Run `{run_id}` has reached its retry limit.")
+        run.retry_count += 1
+        run.status = "queued"
+        run.result = None
+        run.failure = None
+        run.finished_at = None
+        run.cancel_requested_at = None
+        run.cancelled_at = None
+        run.worker_instance_id = None
+        run.updated_at = utc_now()
+        run.events.append(RunEvent(kind="retry_requested", stage="Queue", message=f"Run requeued for retry {run.retry_count}."))
+        return self.store.create_run(run)
+
+    def update_run_priority(self, run_id: str, *, priority: int, queue_name: str | None = None) -> AutomationRun:
+        run = self.store.get_run(run_id)
+        run.priority = int(priority)
+        if queue_name is not None:
+            run.queue_name = queue_name.strip() or "default"
+        run.updated_at = utc_now()
+        run.events.append(
+            RunEvent(
+                kind="queue_updated",
+                stage="Queue",
+                message=f"Run priority set to {run.priority}.",
+                details={"priority": str(run.priority), "queue_name": run.queue_name},
+            )
+        )
+        return self.store.create_run(run)
+
     def register_worker(self, worker_id: str, *, hostname: str | None = None, capabilities: dict[str, object] | None = None, version: str | None = None) -> dict[str, object]:
         if not hasattr(self.store, "register_worker"):
             raise ValueError("The configured run store does not support worker registration.")
@@ -287,6 +415,8 @@ class CoordinatorService:
         run.result = payload.get("result") if isinstance(payload.get("result"), str) else run.result
         run.finished_at = utc_now()
         run.updated_at = run.finished_at
+        if run.status == "cancelled":
+            run.cancelled_at = run.finished_at
         run.events.append(RunEvent(kind="complete", stage="Worker", message=f"Worker finished with status `{run.status}`."))
         saved = self.store.create_run(run)
         try:

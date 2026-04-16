@@ -5,6 +5,7 @@ import sys
 import os
 import threading
 import time
+from importlib import resources
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -18,6 +19,14 @@ from .webhook_service import create_run_from_webhook, handle_jira_webhook
 from .worker_launcher import build_worker_launcher, resolve_worker_launch_mode
 
 
+DASHBOARD_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
+}
+
+
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
     encoded = json.dumps(payload).encode("utf-8")
     handler.send_response(status)
@@ -25,6 +34,23 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.send_header("Content-Length", str(len(encoded)))
     handler.end_headers()
     handler.wfile.write(encoded)
+
+
+def _text_response(handler: BaseHTTPRequestHandler, status: int, content: str, content_type: str = "text/plain; charset=utf-8") -> None:
+    encoded = content.encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(encoded)))
+    handler.end_headers()
+    handler.wfile.write(encoded)
+
+
+def _bytes_response(handler: BaseHTTPRequestHandler, status: int, content: bytes, content_type: str) -> None:
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(content)))
+    handler.end_headers()
+    handler.wfile.write(content)
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -93,6 +119,19 @@ def _server_log(message: str) -> None:
     print(message, file=sys.stdout, flush=True)
 
 
+def _dashboard_asset(name: str) -> tuple[bytes, str] | None:
+    safe_name = name.strip("/").split("/")[-1] or "index.html"
+    if safe_name not in {"index.html", "app.css", "app.js", "mark.svg"}:
+        return None
+    try:
+        asset = resources.files("axle_cli.dashboard").joinpath(safe_name)
+        content = asset.read_bytes()
+    except (FileNotFoundError, ModuleNotFoundError):
+        return None
+    suffix = os.path.splitext(safe_name)[1]
+    return content, DASHBOARD_CONTENT_TYPES.get(suffix, "application/octet-stream")
+
+
 class CoordinatorHttpServer(ThreadingHTTPServer):
     def __init__(
         self,
@@ -159,6 +198,22 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path in {"/", "/dashboard"}:
+            asset = _dashboard_asset("index.html")
+            if asset is None:
+                _json_response(self, HTTPStatus.NOT_FOUND, {"error": "dashboard_not_found"})
+                return
+            content, content_type = asset
+            _bytes_response(self, HTTPStatus.OK, content, content_type)
+            return
+        if parsed.path.startswith("/dashboard/"):
+            asset = _dashboard_asset(parsed.path.removeprefix("/dashboard/"))
+            if asset is None:
+                _json_response(self, HTTPStatus.NOT_FOUND, {"error": "dashboard_asset_not_found"})
+                return
+            content, content_type = asset
+            _bytes_response(self, HTTPStatus.OK, content, content_type)
+            return
         if parsed.path == "/healthz":
             _json_response(self, HTTPStatus.OK, {"ok": True})
             return
@@ -166,6 +221,17 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
             if not self._require_admin():
                 return
             _json_response(self, HTTPStatus.OK, {"workers": self.server.service.list_workers()})
+            return
+        if parsed.path == "/api/queues":
+            if not self._require_admin():
+                return
+            _json_response(self, HTTPStatus.OK, {"queues": self.server.service.list_queues()})
+            return
+        if parsed.path == "/api/runs":
+            if not self._require_admin():
+                return
+            runs = [run.to_json() for run in self.server.service.list_runs()]
+            _json_response(self, HTTPStatus.OK, {"runs": runs})
             return
         if parsed.path.startswith("/api/issues/") and parsed.path.endswith("/runs/latest"):
             if not self._require_admin():
@@ -197,6 +263,54 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
                 return
             _json_response(self, HTTPStatus.OK, event)
             return
+        if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/events"):
+            if not self._require_admin():
+                return
+            run_id = parsed.path.split("/")[3]
+            try:
+                events = self.server.service.run_events(run_id)
+            except FileNotFoundError:
+                _json_response(self, HTTPStatus.NOT_FOUND, {"error": "run_not_found"})
+                return
+            _json_response(self, HTTPStatus.OK, {"run_id": run_id, "events": events})
+            return
+        if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/timeline"):
+            if not self._require_admin():
+                return
+            run_id = parsed.path.split("/")[3]
+            try:
+                timeline = self.server.service.run_timeline(run_id)
+            except FileNotFoundError:
+                _json_response(self, HTTPStatus.NOT_FOUND, {"error": "run_not_found"})
+                return
+            _json_response(self, HTTPStatus.OK, timeline)
+            return
+        if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/artifacts"):
+            if not self._require_admin():
+                return
+            run_id = parsed.path.split("/")[3]
+            try:
+                artifacts = self.server.service.run_artifacts(run_id)
+            except FileNotFoundError:
+                _json_response(self, HTTPStatus.NOT_FOUND, {"error": "run_not_found"})
+                return
+            _json_response(self, HTTPStatus.OK, artifacts)
+            return
+        for artifact_name in ("transcript", "diff", "test-log", "test_log"):
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith(f"/{artifact_name}"):
+                if not self._require_admin():
+                    return
+                run_id = parsed.path.split("/")[3]
+                try:
+                    content = self.server.service.read_run_artifact(run_id, artifact_name)
+                except FileNotFoundError:
+                    _json_response(self, HTTPStatus.NOT_FOUND, {"error": "artifact_not_found"})
+                    return
+                except KeyError as exc:
+                    _json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                    return
+                _text_response(self, HTTPStatus.OK, content)
+                return
         if parsed.path.startswith("/api/runs/"):
             if not self._require_admin():
                 return
@@ -297,6 +411,48 @@ class CoordinatorRequestHandler(BaseHTTPRequestHandler):
                     _json_response(self, HTTPStatus.OK, {"run": None})
                     return
                 _json_response(self, HTTPStatus.OK, {"run": run.to_json()})
+                return
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/pause"):
+                if not self._require_admin():
+                    return
+                run_id = parsed.path.split("/")[3]
+                run = self.server.service.pause_run(run_id, reason=str(body.get("reason") or "") or None)
+                _json_response(self, HTTPStatus.OK, run.to_json())
+                return
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/resume"):
+                if not self._require_admin():
+                    return
+                run_id = parsed.path.split("/")[3]
+                run = self.server.service.resume_run(run_id)
+                _json_response(self, HTTPStatus.OK, run.to_json())
+                return
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/cancel"):
+                if not self._require_admin():
+                    return
+                run_id = parsed.path.split("/")[3]
+                run = self.server.service.cancel_run(run_id, reason=str(body.get("reason") or "") or None)
+                _json_response(self, HTTPStatus.OK, run.to_json())
+                return
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/retry"):
+                if not self._require_admin():
+                    return
+                run_id = parsed.path.split("/")[3]
+                run = self.server.service.retry_run(run_id, force=bool(body.get("force", False)))
+                _json_response(self, HTTPStatus.OK, run.to_json())
+                return
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/priority"):
+                if not self._require_admin():
+                    return
+                run_id = parsed.path.split("/")[3]
+                if "priority" not in body:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {"error": "priority_required"})
+                    return
+                run = self.server.service.update_run_priority(
+                    run_id,
+                    priority=int(body.get("priority") or 0),
+                    queue_name=str(body.get("queue_name")) if body.get("queue_name") is not None else None,
+                )
+                _json_response(self, HTTPStatus.OK, run.to_json())
                 return
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/events"):
                 run_id = parsed.path.split("/")[3]

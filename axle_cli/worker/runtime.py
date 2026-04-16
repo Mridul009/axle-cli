@@ -12,7 +12,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     requests = None
 
-from ..models import AutomationRun, RunSummary, SavedConfig
+from ..models import AutomationRun, RunSummary, SavedConfig, utc_now
 from ..session import SessionRunner
 from ..state import load_config
 from ..terminal import Terminal
@@ -88,7 +88,7 @@ def post_callback(
     if isinstance(payload, str):
         return service.complete_run(run_id, token, {"status": payload, "result": "ok" if payload == "completed" else payload})
     status = payload.get("status")
-    if status in {"completed", "failed"}:
+    if status in {"completed", "failed", "cancelled"}:
         return service.complete_run(run_id, token, payload)
     return service.post_event(
         run_id,
@@ -136,7 +136,7 @@ def claim_remote_run(coordinator_url: str, worker_token: str | None, worker_id: 
 def post_remote_callback(coordinator_url: str, run_id: str, callback_token: str, payload: dict[str, object]) -> dict[str, Any]:
     client = _require_requests()
     status = str(payload.get("status") or "")
-    suffix = "complete" if status in {"completed", "failed"} else "events"
+    suffix = "complete" if status in {"completed", "failed", "cancelled"} else "events"
     response = client.post(
         f"{coordinator_url.rstrip('/')}/api/runs/{run_id}/{suffix}",
         json={"callback_token": callback_token, **payload},
@@ -193,6 +193,16 @@ def _summary_payload(summary: RunSummary) -> dict[str, object]:
         if summary.test_result
         else None,
     }
+
+
+def _cancelled_summary(record: AutomationRun, *, reason: str = "Run was cancelled before worker execution.") -> RunSummary:
+    return RunSummary(
+        run_id=record.run_id,
+        status="cancelled",
+        repository=record.repository,
+        failure=reason,
+        finished_at=utc_now(),
+    )
 
 
 def _progress_payload(event: dict[str, str]) -> dict[str, str]:
@@ -252,8 +262,17 @@ def execute_run(run: AutomationRun | dict[str, object], config: SavedConfig | No
 
     terminal = Terminal(verbose=False, event_handler=emit)
     runner = SessionRunner(runtime_config, terminal)
-    with _heartbeat_loop(emit):
-        summary = runner.run(record.to_run_request())
+    latest = callback_store.get_run(record.run_id)
+    if latest.status in {"cancel_requested", "cancelled"}:
+        summary = _cancelled_summary(latest)
+    else:
+        with _heartbeat_loop(emit):
+            summary = runner.run(record.to_run_request())
+        latest = callback_store.get_run(record.run_id)
+        if latest.status == "cancel_requested":
+            summary.status = "cancelled"
+            summary.failure = "Run was cancelled after worker execution completed."
+            summary.finished_at = utc_now()
     if summary.pr_url:
         post_callback(
             record.run_id,
@@ -282,7 +301,7 @@ def execute_run(run: AutomationRun | dict[str, object], config: SavedConfig | No
             "branch_name": summary.branch_name or "",
             "pr_url": summary.pr_url or "",
             "failure": summary.failure or "",
-            "result": "ok" if summary.status == "completed" else "failed",
+            "result": "ok" if summary.status == "completed" else ("cancelled" if summary.status == "cancelled" else "failed"),
         },
         callback_store,
         callback_token=record.callback_token,
@@ -299,8 +318,11 @@ def execute_remote_run(run: AutomationRun, coordinator_url: str, config: SavedCo
 
     terminal = Terminal(verbose=False, event_handler=emit)
     runner = SessionRunner(runtime_config, terminal)
-    with _heartbeat_loop(emit):
-        summary = runner.run(run.to_run_request())
+    if run.status in {"cancel_requested", "cancelled"}:
+        summary = _cancelled_summary(run)
+    else:
+        with _heartbeat_loop(emit):
+            summary = runner.run(run.to_run_request())
     if summary.pr_url:
         post_remote_callback(
             coordinator_url,
@@ -338,7 +360,7 @@ def execute_remote_run(run: AutomationRun, coordinator_url: str, config: SavedCo
             "branch_name": summary.branch_name or "",
             "pr_url": summary.pr_url or "",
             "failure": summary.failure or "",
-            "result": "ok" if summary.status == "completed" else "failed",
+            "result": "ok" if summary.status == "completed" else ("cancelled" if summary.status == "cancelled" else "failed"),
         },
     )
     return summary

@@ -156,12 +156,17 @@ class FileArtifactStore:
             "transcript": "goose-transcript.log",
             "diff": "changes.patch",
             "test_log": "test.log",
+            "test-log": "test.log",
             "summary": "summary.json",
             "manifest": "manifest.json",
         }
         if name not in filenames:
             raise KeyError(f"Unknown artifact name: {name}")
         return self.run_root(run_id) / filenames[name]
+
+    def read_artifact(self, run_id: str, name: str) -> str:
+        path = self.artifact_path(run_id, name)
+        return path.read_text(encoding="utf-8")
 
 
 def build_artifact_store(*, backend: str | None = None, root: str | Path | None = None) -> FileArtifactStore:

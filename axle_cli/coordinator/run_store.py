@@ -57,6 +57,11 @@ class _FileRunStoreBackend:
             "base_branch": str(payload.get("base_branch") or "main"),
             "task": str(payload.get("task") or ""),
             "callback_url": payload.get("callback_url"),
+            "max_repair_attempts": int(payload.get("max_repair_attempts") or 1),
+            "retry_count": int(payload.get("retry_count") or 0),
+            "max_retries": int(payload.get("max_retries") or 1),
+            "priority": int(payload.get("priority") or 0),
+            "queue_name": str(payload.get("queue_name") or "default"),
             "status": str(payload.get("status") or "queued"),
             "result": payload.get("result"),
             "callback_token": str(payload.get("callback_token") or uuid4().hex),
@@ -133,23 +138,46 @@ class _FileRunStoreBackend:
         return payload
 
     def claim_next_queued_run(self, worker_id: str) -> AutomationRun | None:
-        candidates = sorted(
-            self.runs_dir.glob("*.json"),
-            key=lambda path: (path.stat().st_mtime, path.name),
-        )
-        for path in candidates:
+        candidates: list[AutomationRun] = []
+        for path in self.runs_dir.glob("*.json"):
             try:
                 run = self._read_run_path(path)
             except (OSError, ValueError):
                 continue
             if run.status != "queued":
                 continue
+            candidates.append(run)
+        candidates.sort(key=lambda run: (-run.priority, run.created_at, run.run_id))
+        for run in candidates:
             run.status = "running"
             run.worker_instance_id = worker_id
             run.updated_at = utc_now()
             run.events.append(RunEvent(kind="worker", stage="Coordinator", message=f"Assigned to worker `{worker_id}`."))
             return self.create_run(run)
         return None
+
+    def list_queues(self) -> list[dict[str, object]]:
+        queues: dict[str, dict[str, object]] = {}
+        for run in self.list_runs():
+            queue_name = run.queue_name or "default"
+            queue = queues.setdefault(
+                queue_name,
+                {
+                    "queue_name": queue_name,
+                    "queued": 0,
+                    "paused": 0,
+                    "running": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "cancelled": 0,
+                    "cancel_requested": 0,
+                    "total": 0,
+                },
+            )
+            if run.status in queue:
+                queue[run.status] = int(queue[run.status]) + 1
+            queue["total"] = int(queue["total"]) + 1
+        return sorted(queues.values(), key=lambda item: str(item["queue_name"]))
 
     def list_workers(self) -> list[dict[str, object]]:
         if not self.workers_dir.exists():
@@ -308,14 +336,15 @@ class _SqliteRunStoreBackend:
 
     def claim_next_queued_run(self, worker_id: str) -> AutomationRun | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT run_id, payload_json FROM runs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
-            ).fetchone()
-            if row is None:
+            rows = connection.execute(
+                "SELECT run_id, payload_json FROM runs WHERE status = 'queued'"
+            ).fetchall()
+            queued_runs = [AutomationRun.from_json(json.loads(row["payload_json"])) for row in rows]
+            queued_runs = [run for run in queued_runs if run.status == "queued"]
+            if not queued_runs:
                 return None
-            run = AutomationRun.from_json(json.loads(row["payload_json"]))
-            if run.status != "queued":
-                return None
+            queued_runs.sort(key=lambda run: (-run.priority, run.created_at, run.run_id))
+            run = queued_runs[0]
             run.status = "running"
             run.worker_instance_id = worker_id
             run.updated_at = utc_now()
@@ -341,6 +370,29 @@ class _SqliteRunStoreBackend:
         with self._connect() as connection:
             rows = connection.execute("SELECT payload_json FROM worker_registrations ORDER BY updated_at DESC").fetchall()
         return [dict(json.loads(row["payload_json"])) for row in rows]
+
+    def list_queues(self) -> list[dict[str, object]]:
+        queues: dict[str, dict[str, object]] = {}
+        for run in self.list_runs():
+            queue_name = run.queue_name or "default"
+            queue = queues.setdefault(
+                queue_name,
+                {
+                    "queue_name": queue_name,
+                    "queued": 0,
+                    "paused": 0,
+                    "running": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "cancelled": 0,
+                    "cancel_requested": 0,
+                    "total": 0,
+                },
+            )
+            if run.status in queue:
+                queue[run.status] = int(queue[run.status]) + 1
+            queue["total"] = int(queue["total"]) + 1
+        return sorted(queues.values(), key=lambda item: str(item["queue_name"]))
 
 
 class _DelegatingRunStore:

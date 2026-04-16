@@ -19,5 +19,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.package-data]
+"axle_cli.dashboard" = ["*.html", "*.css", "*.js", "*.svg"]
+
 [tool.setuptools.packages.find]
 include = ["axle_cli*"]

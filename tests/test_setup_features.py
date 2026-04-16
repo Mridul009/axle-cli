@@ -1033,7 +1033,6 @@ class SetupFeatureTests(unittest.TestCase):
             [
                 "/usr/local/bin/goose",
                 "run",
-                "--no-profile",
                 "--output-format",
                 "stream-json",
                 "--recipe",

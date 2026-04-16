@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import io
 import json
 import os
 import socket
 import threading
 import sys
 import tempfile
+import types
 import unittest
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
@@ -1362,3 +1364,206 @@ class CoordinatorWorkerTests(unittest.TestCase):
 
         complete = progress_payload({"kind": "complete", "stage": "Worker", "message": "done"})
         self.assertEqual(complete.get("progress_percent"), "100")
+
+    def test_queue_claiming_prefers_higher_priority_runs_for_file_and_sqlite_stores(self):
+        run_store = self._import_any("axle_cli.coordinator.run_store")
+        store_classes = [
+            self._get_attr(run_store, "FileBackedRunStore"),
+            self._get_attr(run_store, "SqliteRunStore"),
+        ]
+
+        for store_cls in store_classes:
+            with self.subTest(store=store_cls.__name__):
+                tempdir = self._temp_root()
+                store = self._build_store(store_cls, Path(tempdir.name))
+                store.create_run(
+                    {
+                        "run_id": "low-priority",
+                        "task": "low",
+                        "repository": "https://github.com/acme/widgets.git",
+                        "base_branch": "main",
+                        "status": "queued",
+                        "priority": 1,
+                    }
+                )
+                store.create_run(
+                    {
+                        "run_id": "high-priority",
+                        "task": "high",
+                        "repository": "https://github.com/acme/widgets.git",
+                        "base_branch": "main",
+                        "status": "queued",
+                        "priority": 10,
+                    }
+                )
+
+                claimed = store.claim_next_queued_run("worker-priority")
+
+                self.assertIsNotNone(claimed)
+                self.assertEqual(claimed.run_id, "high-priority")
+                self.assertEqual(claimed.status, "running")
+
+    def test_coordinator_service_supports_pause_resume_cancel_retry_and_priority(self):
+        tempdir = self._temp_root()
+        api = self._import_any("axle_cli.coordinator.api")
+        run_store = self._import_any("axle_cli.coordinator.run_store")
+        models = self._import_any("axle_cli.models")
+
+        store = self._build_store(self._get_attr(run_store, "FileBackedRunStore"), Path(tempdir.name))
+        service = api.CoordinatorService(models.SavedConfig(), store=store)
+        store.create_run(
+            {
+                "run_id": "queue-control-1",
+                "task": "queue controls",
+                "repository": "https://github.com/acme/widgets.git",
+                "base_branch": "main",
+                "status": "queued",
+                "max_retries": 2,
+            }
+        )
+
+        paused = service.pause_run("queue-control-1", reason="hold")
+        self.assertEqual(paused.status, "paused")
+        self.assertEqual(paused.paused_reason, "hold")
+
+        resumed = service.resume_run("queue-control-1")
+        self.assertEqual(resumed.status, "queued")
+        self.assertIsNone(resumed.paused_reason)
+
+        prioritized = service.update_run_priority("queue-control-1", priority=7, queue_name="urgent")
+        self.assertEqual(prioritized.priority, 7)
+        self.assertEqual(prioritized.queue_name, "urgent")
+        self.assertEqual(service.list_queues()[0]["queue_name"], "urgent")
+
+        cancelled = service.cancel_run("queue-control-1", reason="operator")
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertEqual(cancelled.result, "cancelled")
+        self.assertIsNotNone(cancelled.cancelled_at)
+
+        retried = service.retry_run("queue-control-1")
+        self.assertEqual(retried.status, "queued")
+        self.assertEqual(retried.retry_count, 1)
+        self.assertIsNone(retried.failure)
+        self.assertTrue(any(event.kind == "retry_requested" for event in retried.events))
+
+    def test_worker_runtime_does_not_execute_cancelled_runs(self):
+        tempdir = self._temp_root()
+        runtime = self._import_any("axle_cli.worker.runtime")
+        run_store = self._import_any("axle_cli.coordinator.run_store")
+        models = self._import_any("axle_cli.models")
+
+        store = self._build_store(self._get_attr(run_store, "FileBackedRunStore"), Path(tempdir.name))
+        run = store.create_run(
+            {
+                "run_id": "cancelled-worker-1",
+                "task": "do not run",
+                "repository": "https://github.com/acme/widgets.git",
+                "base_branch": "main",
+                "status": "cancel_requested",
+            }
+        )
+
+        with mock.patch("axle_cli.worker.runtime.SessionRunner.run") as runner:
+            summary = runtime.execute_run(run, config=models.SavedConfig(), store=store)
+
+        runner.assert_not_called()
+        self.assertEqual(summary.status, "cancelled")
+        refreshed = store.get_run("cancelled-worker-1")
+        self.assertEqual(refreshed.status, "cancelled")
+        self.assertEqual(refreshed.result, "cancelled")
+
+    def test_coordinator_dashboard_routes_serve_static_assets_and_dashboard_apis(self):
+        tempdir = self._temp_root()
+        server_module = self._import_any("axle_cli.coordinator.server")
+        api = self._import_any("axle_cli.coordinator.api")
+        artifact_store = self._import_any("axle_cli.coordinator.artifact_store")
+        run_store = self._import_any("axle_cli.coordinator.run_store")
+        models = self._import_any("axle_cli.models")
+
+        store = self._build_store(self._get_attr(run_store, "FileBackedRunStore"), Path(tempdir.name))
+        artifacts = artifact_store.FileArtifactStore(root=Path(tempdir.name) / "artifacts")
+        service = api.CoordinatorService(models.SavedConfig(), store=store, artifact_store=artifacts)
+        fake_server = types.SimpleNamespace(
+            service=service,
+            store=store,
+            artifact_store=artifacts,
+            admin_token="admin-token",
+            worker_token="worker-token",
+            webhook_secret=None,
+            worker_launch_mode="planned",
+            coordinator_url=None,
+        )
+
+        run = store.create_run(
+            models.AutomationRun(
+                run_id="dashboard-run-1",
+                issue_key="APP-501",
+                issue_url="https://jira.example/browse/APP-501",
+                repository="https://github.com/acme/widgets.git",
+                base_branch="main",
+                task="Dashboard smoke",
+                status="queued",
+                priority=4,
+            )
+        )
+        artifacts.store_run_artifacts(
+            run.run_id,
+            transcript="transcript body",
+            diff="diff body",
+            test_log="test log body",
+            summary={"status": "queued"},
+        )
+
+        class FakeHandler:
+            def __init__(self, path: str, token: str | None = "admin-token") -> None:
+                self.path = path
+                self.headers = {"Authorization": f"Bearer {token}"} if token else {}
+                self.server = fake_server
+                self.wfile = io.BytesIO()
+                self.status = None
+                self.response_headers = {}
+                self._require_admin = server_module.CoordinatorRequestHandler._require_admin.__get__(self)
+                self._require_worker = server_module.CoordinatorRequestHandler._require_worker.__get__(self)
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, name, value):
+                self.response_headers[name] = value
+
+            def end_headers(self):
+                return None
+
+        def get(path: str, token: str | None = "admin-token") -> FakeHandler:
+            handler = FakeHandler(path, token=token)
+            server_module.CoordinatorRequestHandler.do_GET(handler)
+            return handler
+
+        html_response = get("/", token=None)
+        html = html_response.wfile.getvalue().decode("utf-8")
+        self.assertEqual(html_response.status, 200)
+        self.assertIn("Axle Coordinator", html)
+
+        script_response = get("/dashboard/app.js", token=None)
+        self.assertEqual(script_response.status, 200)
+        self.assertIn("application/javascript", script_response.response_headers.get("Content-Type", ""))
+        script = script_response.wfile.getvalue().decode("utf-8")
+        self.assertIn("/api/runs", script)
+
+        runs_response = get("/api/runs")
+        runs_payload = json.loads(runs_response.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(runs_response.status, 200)
+        self.assertEqual(runs_payload["runs"][0]["run_id"], "dashboard-run-1")
+
+        timeline_response = get("/api/runs/dashboard-run-1/timeline")
+        timeline_payload = json.loads(timeline_response.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(timeline_response.status, 200)
+        self.assertEqual(timeline_payload["run_id"], "dashboard-run-1")
+
+        transcript_response = get("/api/runs/dashboard-run-1/transcript")
+        transcript = transcript_response.wfile.getvalue().decode("utf-8")
+        self.assertEqual(transcript_response.status, 200)
+        self.assertEqual(transcript, "transcript body")
+
+        unauthorized_response = get("/api/runs", token="wrong")
+        self.assertEqual(unauthorized_response.status, 401)

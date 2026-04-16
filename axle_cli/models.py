@@ -316,6 +316,12 @@ class AutomationRun:
     max_repair_attempts: int = 1
     retry_count: int = 0
     max_retries: int = 1
+    priority: int = 0
+    queue_name: str = "default"
+    paused_reason: str | None = None
+    paused_from_status: str | None = None
+    cancel_requested_at: datetime | None = None
+    cancelled_at: datetime | None = None
     status: str = "queued"
     worker_instance_id: str | None = None
     worker_launch_spec: WorkerLaunchSpec | None = None
@@ -355,6 +361,12 @@ class AutomationRun:
             "max_repair_attempts": self.max_repair_attempts,
             "retry_count": self.retry_count,
             "max_retries": self.max_retries,
+            "priority": self.priority,
+            "queue_name": self.queue_name,
+            "paused_reason": self.paused_reason,
+            "paused_from_status": self.paused_from_status,
+            "cancel_requested_at": _serialize_datetime(self.cancel_requested_at),
+            "cancelled_at": _serialize_datetime(self.cancelled_at),
             "status": self.status,
             "worker_instance_id": self.worker_instance_id,
             "worker_launch_spec": self.worker_launch_spec.to_json() if self.worker_launch_spec else None,
@@ -396,6 +408,12 @@ class AutomationRun:
             max_repair_attempts=int(payload.get("max_repair_attempts", 1)),
             retry_count=int(payload.get("retry_count", 0)),
             max_retries=int(payload.get("max_retries", 1)),
+            priority=int(payload.get("priority", 0)),
+            queue_name=str(payload.get("queue_name") or "default"),
+            paused_reason=payload.get("paused_reason"),
+            paused_from_status=payload.get("paused_from_status"),
+            cancel_requested_at=_deserialize_datetime(payload.get("cancel_requested_at")),
+            cancelled_at=_deserialize_datetime(payload.get("cancelled_at")),
             status=str(payload.get("status") or "queued"),
             worker_instance_id=payload.get("worker_instance_id"),
             worker_launch_spec=WorkerLaunchSpec.from_json(payload["worker_launch_spec"]) if payload.get("worker_launch_spec") else None,
