@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from ..state import load_config
 from .api import CoordinatorService
 from .artifact_store import build_artifact_store
+from .docker_worker_pool import DockerWorkerPoolManager, build_docker_worker_pool
 from .store_factory import open_run_store
 from .webhook_service import create_run_from_webhook, handle_jira_webhook
 from .worker_launcher import build_worker_launcher, resolve_worker_launch_mode
@@ -170,6 +171,16 @@ class CoordinatorHttpServer(ThreadingHTTPServer):
         self.worker_token = (worker_token or "").strip() or self.admin_token
         env_secret = (webhook_secret or os.getenv("AXLE_JIRA_WEBHOOK_SECRET") or os.getenv("AXLE_WEBHOOK_SECRET") or "").strip()
         self.webhook_secret = env_secret or None
+        self.docker_worker_pool: DockerWorkerPoolManager = build_docker_worker_pool(
+            self.service,
+            coordinator_url=self.coordinator_url,
+            worker_token=self.worker_token,
+        )
+        self._autoscaler_stop = threading.Event()
+        self._autoscaler_thread: threading.Thread | None = None
+        if self.docker_worker_pool.enabled:
+            self._autoscaler_thread = threading.Thread(target=self._autoscaler_loop, daemon=True)
+            self._autoscaler_thread.start()
         super().__init__(server_address, CoordinatorRequestHandler)
 
     def _watchdog_loop(self) -> None:
@@ -186,7 +197,28 @@ class CoordinatorHttpServer(ThreadingHTTPServer):
             except Exception:
                 continue
 
+    def _autoscaler_loop(self) -> None:
+        interval = max(1, int(self.docker_worker_pool.config.poll_interval_seconds))
+        while not self._autoscaler_stop.wait(interval):
+            try:
+                summary = self.docker_worker_pool.reconcile_once()
+                if summary.get("started") or summary.get("stopped"):
+                    _server_log(
+                        "[autoscale] "
+                        f"queued={summary.get('queued')} "
+                        f"desired={summary.get('desired')} "
+                        f"running={summary.get('running')} "
+                        f"started={summary.get('started')} "
+                        f"stopped={summary.get('stopped')}"
+                    )
+            except Exception as exc:
+                _server_log(f"[autoscale] error={exc}")
+                continue
+
     def server_close(self) -> None:
+        self._autoscaler_stop.set()
+        if self._autoscaler_thread is not None and self._autoscaler_thread.is_alive():
+            self._autoscaler_thread.join(timeout=1.0)
         self._watchdog_stop.set()
         if self._watchdog_thread.is_alive():
             self._watchdog_thread.join(timeout=1.0)
@@ -569,4 +601,7 @@ def serve_coordinator(
         worker_launch_mode=worker_launch_mode,
         coordinator_url=coordinator_url,
     )
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()

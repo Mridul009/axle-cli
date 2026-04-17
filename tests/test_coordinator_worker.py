@@ -6,6 +6,7 @@ import io
 import json
 import os
 import socket
+import subprocess
 import threading
 import sys
 import tempfile
@@ -15,6 +16,10 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
+
+
+def subprocess_result(stdout: str = "", stderr: str = "", returncode: int = 0):
+    return subprocess.CompletedProcess(args=["docker"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 @unittest.skipUnless(
@@ -477,6 +482,190 @@ class CoordinatorWorkerTests(unittest.TestCase):
 
         self.assertEqual(len(set(claimed)), 3)
         self.assertEqual({store.get_run(run_id).status for run_id in claimed}, {"running"})
+
+    def test_docker_worker_pool_config_is_disabled_by_default_and_validates_required_env(self):
+        pool_module = self._import_any("axle_cli.coordinator.docker_worker_pool")
+        config_cls = self._get_attr(pool_module, "DockerWorkerPoolConfig")
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            disabled = config_cls.from_env()
+
+        self.assertFalse(disabled.enabled)
+        self.assertIn("AXLE_DOCKER_AUTOSCALE", disabled.disabled_reason)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AXLE_DOCKER_AUTOSCALE": "true",
+                "AXLE_WORKER_IMAGE": "axle-cli-agent:dashboard",
+                "AXLE_COORDINATOR_URL": "http://axle-coordinator:8080",
+                "AXLE_WORKER_TOKEN": "worker-secret",
+                "AXLE_WORKER_MIN": "1",
+                "AXLE_WORKER_MAX": "3",
+            },
+            clear=True,
+        ):
+            enabled = config_cls.from_env()
+
+        self.assertTrue(enabled.enabled)
+        self.assertEqual(enabled.min_workers, 1)
+        self.assertEqual(enabled.max_workers, 3)
+        self.assertEqual(enabled.image, "axle-cli-agent:dashboard")
+
+    def test_docker_worker_pool_scales_up_to_bounded_queue_depth(self):
+        pool_module = self._import_any("axle_cli.coordinator.docker_worker_pool")
+        models = self._import_any("axle_cli.models")
+        config = pool_module.DockerWorkerPoolConfig(
+            enabled=True,
+            image="axle-cli-agent:dashboard",
+            network="axle-net",
+            volume="axle_cli_data:/data/.axle-cli",
+            max_workers=4,
+            coordinator_url="http://axle-coordinator:8080",
+            worker_token="worker-secret",
+        )
+        runs = [
+            models.AutomationRun(
+                run_id=f"run-{index}",
+                issue_key=f"APP-{index}",
+                issue_url=f"https://jira.example/browse/APP-{index}",
+                repository="https://github.com/acme/widgets.git",
+                base_branch="main",
+                task="Queued",
+                status="queued",
+            )
+            for index in range(40)
+        ]
+        service = types.SimpleNamespace(list_runs=lambda: runs)
+        manager = pool_module.DockerWorkerPoolManager(service, config)
+        completed = subprocess_result("")
+        commands: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            return completed
+
+        with mock.patch.object(pool_module.subprocess, "run", side_effect=fake_run):
+            summary = manager.reconcile_once()
+
+        docker_runs = [command for command in commands if command[:2] == ["docker", "run"]]
+        self.assertEqual(summary["started"], 4)
+        self.assertEqual(len(docker_runs), 4)
+        self.assertIn("--network", docker_runs[0])
+        self.assertIn("axle-net", docker_runs[0])
+        self.assertIn("axle_cli_data:/data/.axle-cli", docker_runs[0])
+        self.assertIn("--worker-token", docker_runs[0])
+        self.assertIn("worker-secret", docker_runs[0])
+        self.assertIn("--worker-id", docker_runs[0])
+        self.assertIn("axle-worker-auto-1", docker_runs[0])
+
+    def test_docker_worker_pool_counts_existing_autoscaled_workers_before_starting_more(self):
+        pool_module = self._import_any("axle_cli.coordinator.docker_worker_pool")
+        models = self._import_any("axle_cli.models")
+        config = pool_module.DockerWorkerPoolConfig(
+            enabled=True,
+            image="axle-cli-agent:dashboard",
+            max_workers=4,
+            coordinator_url="http://axle-coordinator:8080",
+            worker_token="worker-secret",
+        )
+        runs = [
+            models.AutomationRun(
+                run_id=f"run-{index}",
+                issue_key=f"APP-{index}",
+                issue_url=f"https://jira.example/browse/APP-{index}",
+                repository="https://github.com/acme/widgets.git",
+                base_branch="main",
+                task="Queued",
+                status="queued",
+            )
+            for index in range(3)
+        ]
+        service = types.SimpleNamespace(list_runs=lambda: runs)
+        manager = pool_module.DockerWorkerPoolManager(service, config)
+        responses = [
+            subprocess_result("axle-worker-auto-1\naxle-worker-auto-2\n"),
+            subprocess_result("axle-worker-auto-1\naxle-worker-auto-2\n"),
+        ]
+        commands: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            if command[:2] == ["docker", "ps"]:
+                return responses.pop(0)
+            return subprocess_result("")
+
+        with mock.patch.object(pool_module.subprocess, "run", side_effect=fake_run):
+            summary = manager.reconcile_once()
+
+        docker_runs = [command for command in commands if command[:2] == ["docker", "run"]]
+        self.assertEqual(summary["started"], 1)
+        self.assertEqual(len(docker_runs), 1)
+        self.assertIn("axle-worker-auto-3", docker_runs[0])
+
+    def test_docker_worker_pool_stops_only_idle_unassigned_workers_when_queue_empty(self):
+        pool_module = self._import_any("axle_cli.coordinator.docker_worker_pool")
+        models = self._import_any("axle_cli.models")
+        config = pool_module.DockerWorkerPoolConfig(
+            enabled=True,
+            image="axle-cli-agent:dashboard",
+            max_workers=4,
+            idle_ttl_seconds=60,
+            coordinator_url="http://axle-coordinator:8080",
+            worker_token="worker-secret",
+        )
+        runs = [
+            models.AutomationRun(
+                run_id="running-1",
+                issue_key="APP-500",
+                issue_url="https://jira.example/browse/APP-500",
+                repository="https://github.com/acme/widgets.git",
+                base_branch="main",
+                task="Running",
+                status="running",
+                worker_instance_id="axle-worker-auto-1",
+            )
+        ]
+        service = types.SimpleNamespace(list_runs=lambda: runs)
+        manager = pool_module.DockerWorkerPoolManager(service, config)
+        old_started = "2026-04-16T00:00:00.000000000Z\n"
+        commands: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            if command[:2] == ["docker", "ps"]:
+                return subprocess_result("axle-worker-auto-1\naxle-worker-auto-2\n")
+            if command[:2] == ["docker", "inspect"]:
+                return subprocess_result(old_started)
+            return subprocess_result("")
+
+        with mock.patch.object(pool_module.subprocess, "run", side_effect=fake_run):
+            summary = manager.reconcile_once()
+
+        removes = [command for command in commands if command[:3] == ["docker", "rm", "-f"]]
+        self.assertEqual(summary["stopped"], 1)
+        self.assertEqual(removes, [["docker", "rm", "-f", "axle-worker-auto-2"]])
+
+    def test_coordinator_server_starts_docker_autoscaler_only_when_enabled(self):
+        tempdir = self._temp_root()
+        server_module = self._import_any("axle_cli.coordinator.server")
+        config = types.SimpleNamespace(poll_interval_seconds=1)
+        manager = types.SimpleNamespace(enabled=True, config=config, reconcile_once=mock.Mock(return_value={"started": 0, "stopped": 0}))
+
+        with mock.patch.object(server_module, "build_docker_worker_pool", return_value=manager):
+            try:
+                server = server_module.CoordinatorHttpServer(
+                    ("127.0.0.1", 0),
+                    store_root=tempdir.name,
+                    worker_token="worker-secret",
+                    coordinator_url="http://axle-coordinator:8080",
+                )
+            except PermissionError as exc:
+                self.skipTest(f"local socket bind is not permitted in this environment: {exc}")
+
+        self.addCleanup(server.server_close)
+        self.assertIsNotNone(server._autoscaler_thread)
+        self.assertTrue(server._autoscaler_thread.is_alive())
 
     def test_routing_config_applies_project_label_and_component_rules(self):
         tempdir = self._temp_root()
